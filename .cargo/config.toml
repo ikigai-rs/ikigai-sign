@@ -1,0 +1,5 @@
+# oxrdf/oxrdfio pull getrandom 0.3, whose wasm backend must be selected explicitly.
+# Needed to build the lib for wasm32 (the crate's browser face — the CI `clippy (wasm
+# lib)` gate). NOT a path override: purely the wasm getrandom cfg, safe to commit.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

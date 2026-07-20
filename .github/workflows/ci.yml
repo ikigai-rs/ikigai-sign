@@ -1,0 +1,37 @@
+# CI for ikigai-sign. Ed25519 signing/verification + the RDF signature-graph are pure
+# Rust; the two endpoints depend only on the (wasm-clean) `ikigai-core` kernel and the
+# pure-Rust `ed25519-dalek`/`sha2`/`oxrdf` stack — so the crate has a genuine browser
+# face (sign/verify client-side). Check both faces: native --all-targets + tests, and a
+# wasm lib build so browser drift can't slip into the publish cascade.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (native, all targets)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test
+
+      # The browser face: the lib must still compile to wasm32 (its deps — ikigai-core,
+      # ed25519-dalek, sha2, base64, oxrdf/oxrdfio — are all wasm-clean; the dev-dep
+      # `futures` executor is not compiled for --lib).
+      - name: clippy (wasm lib)
+        run: cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
