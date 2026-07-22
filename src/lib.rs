@@ -45,7 +45,7 @@
 use async_trait::async_trait;
 use base64::Engine as _;
 use ed25519_dalek::pkcs8::{spki::DecodePublicKey, DecodePrivateKey};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use ikigai_core::{
     ArgSpec, Description, Endpoint, EndpointSpace, Error as CoreError, Exact, Invocation, Iri,
     ReprType, Representation, Request, Result as CoreResult, Verb,
@@ -333,7 +333,12 @@ fn verify_message(
     let signature = Signature::from_slice(&sig_bytes)
         .map_err(|e| format!("sig:value is not a 64-byte Ed25519 signature: {e}"))?;
 
-    match verifying_key.verify(message, &signature) {
+    // `verify_strict`, not `verify`: a signature is this crate's content-address
+    // (`urn:sign:{sha256(signature)}`), so verification must admit exactly ONE valid signature per
+    // (message, key). The permissive `verify` accepts small-order (weak) keys — a hole that lets a
+    // forged signature validate almost any message, minting a bogus `urn:sign:` node. `verify_strict`
+    // rejects small-order `A`/`R`; S-scalar canonicity is already enforced above by `from_slice`.
+    match verifying_key.verify_strict(message, &signature) {
         Ok(()) => Ok(Verdict::Valid {
             signer_b64: B64.encode(verifying_key.to_bytes()),
         }),
