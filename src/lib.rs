@@ -423,9 +423,11 @@ fn verify_ed25519(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Resul
         .map_err(|e| format!("sig:value is not valid base64: {e}"))?;
     let signature = Signature::from_slice(&sig_bytes)
         .map_err(|e| format!("sig:value is not a 64-byte Ed25519 signature: {e}"))?;
-    // `verify_strict`, not `verify`: it rejects weak-key / small-order (torsion) public keys
-    // and the associated signature malleability — the stricter check RFC 8032 §8.5 wants for a
-    // security decision. (Folds in a hardening fix that was written but never merged.)
+    // `verify_strict`, not `verify`: a signature is this crate's content-address
+    // (`urn:sign:{sha256(signature)}`), so verification must admit exactly ONE valid signature
+    // per (message, key). The permissive `verify` accepts small-order (weak) keys — a hole that
+    // lets a forged signature validate almost any message, minting a bogus `urn:sign:` node.
+    // `verify_strict` rejects small-order `A`/`R`; S-scalar canonicity is enforced by `from_slice`.
     Ok(match key.verify_strict(message, &signature) {
         Ok(()) => Verdict::Valid {
             algorithm: ALG_ED25519.to_string(),

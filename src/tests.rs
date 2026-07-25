@@ -49,6 +49,20 @@ impl Endpoint for StaticKey {
     }
 }
 
+/// Like [`StaticKey`] but owns its bytes — for keys computed at test time (the weak-key vector
+/// builds an SPKI-wrapped small-order public key), not embeddable as a `&'static str`.
+struct OwnedKey(Vec<u8>);
+
+#[async_trait]
+impl Endpoint for OwnedKey {
+    async fn invoke(&self, _inv: &Invocation<'_>) -> CoreResult<Representation> {
+        Ok(Representation::new(
+            ReprType::new("application/octet-stream"),
+            self.0.clone(),
+        ))
+    }
+}
+
 /// A kernel over this crate's `space()` plus three bound key resources.
 fn kernel() -> Kernel {
     let space = space()
@@ -151,6 +165,74 @@ fn tampered_signature_value_is_invalid() {
         verdict.contains("does not verify"),
         "a tampered signature must fail the Ed25519 check, got: {verdict}"
     );
+}
+
+// ---- non-malleability: a weak-key forgery is rejected (verify vs verify_strict) ----------
+
+/// Why verification is `verify_strict`, not the permissive `verify`. A signature IS this crate's
+/// content-address (`urn:sign:{sha256(signature)}`), so a signature that verifies for a message
+/// it was never honestly signed for would mint a bogus `urn:sign:<hash>` node for that fact.
+/// Ed25519's *weak-key* malleability is exactly such a hole: a small-order public key admits a
+/// forged signature that satisfies almost every message (here the identity point `A`, with the
+/// trivial `s = 0`, `R = A`, so the verification point `[s]B − [k]A = 𝒪 = R` for ANY `k`). The
+/// permissive `verify` accepts it; `verify_strict` rejects any small-order `A`/`R`
+/// (`VerifyingKey::is_weak`). This test asserts both halves: (1) the plain `verify` ACCEPTS the
+/// forgery — so it is a genuine malleability vector, not noise; (2) the OPEN `urn:sign:verify`
+/// endpoint (now on `verify_strict`) REJECTS it end-to-end, key resolved through the kernel.
+#[test]
+fn weak_key_forgery_is_rejected_though_permissive_verify_accepts() {
+    use ed25519_dalek::Verifier;
+
+    let msg = b"a fact no one honestly signed";
+
+    // The small-order public key: the Edwards identity point, compressed as `[1, 0, …, 0]`.
+    let mut weak_pub = [0u8; 32];
+    weak_pub[0] = 1;
+    // The forgery: R = identity (`[1, 0, …, 0]`), s = 0. 64 bytes = R ‖ s.
+    let mut forged_sig = [0u8; 64];
+    forged_sig[0] = 1;
+
+    // (1) The permissive `verify` accepts it — the malleability the content-address must not
+    // admit. (If this ever stops holding, the vector is wrong and the test proves nothing.)
+    let weak_vk = VerifyingKey::from_bytes(&weak_pub).unwrap();
+    assert!(weak_vk.is_weak(), "the identity point is a small-order key");
+    let sig = Signature::from_slice(&forged_sig).unwrap();
+    assert!(
+        weak_vk.verify(msg, &sig).is_ok(),
+        "the weak-key forgery must satisfy the permissive equation (else it proves nothing)"
+    );
+
+    // (2) End-to-end through the OPEN endpoint, weak key resolved through the kernel. Take a real
+    // sig-graph (for its shape + correct content hash of `msg`), then swap in the weak signer and
+    // the forged value; the content-hash/signer pre-checks pass, so verification is reached.
+    let spki = weak_key_spki(&weak_pub);
+    let k = {
+        let space = space()
+            .bind(Exact::new("urn:test:k1-priv"), StaticKey(K1_PRIV))
+            .bind(Exact::new("urn:test:weak-pub"), OwnedKey(spki));
+        Kernel::new(Arc::new(space))
+    };
+    let graph = sign(&k, msg, "urn:test:k1-priv");
+    let fields = parse_sig_graph(&graph).unwrap();
+    let forged_graph = graph
+        .replace(&fields.signer_b64.unwrap(), &B64.encode(weak_pub))
+        .replace(&fields.value_b64, &B64.encode(forged_sig));
+    assert_ne!(forged_graph, graph, "signer + value must have been swapped");
+
+    let verdict = verify(&k, msg, &forged_graph, "urn:test:weak-pub");
+    assert!(
+        verdict.contains("does not verify"),
+        "a weak-key forgery must fail strict verification, got: {verdict}"
+    );
+}
+
+/// Wrap a 32-byte Ed25519 public key in its standard SPKI DER envelope, so it resolves through
+/// the kernel exactly as a real `urn:*` key does (12-byte fixed Ed25519 SPKI prefix + the key).
+fn weak_key_spki(pubkey: &[u8; 32]) -> Vec<u8> {
+    const SPKI_PREFIX: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    SPKI_PREFIX.iter().chain(pubkey).copied().collect()
 }
 
 // ---- the signature-graph is valid RDF with the expected triples --------------------------
