@@ -24,6 +24,13 @@ async-trait = "0.1"
 # module's job), so it pulls no RNG. Pure Rust (curve25519-dalek) ⇒ wasm-clean.
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem"] }
 
+# ES256 (ECDSA over NIST P-256 + SHA-256) — the SECOND signature algorithm, and the one the
+# Apple Secure Enclave / TPMs speak (they cannot hold Ed25519). Signing is RFC-6979
+# DETERMINISTIC, so the signature-graph stays content-addressable exactly like Ed25519, and no
+# RNG is pulled. `pkcs8`+`pem` load a standard EC private (PKCS8) / public (SPKI) key. Pure Rust
+# ⇒ wasm-clean. The module dispatches on `sig:algorithm`, so adding this did not touch Ed25519.
+p256 = { version = "0.13", default-features = false, features = ["std", "ecdsa", "pkcs8", "pem"] }
+
 # SHA-256 for `sig:contentHash` (RustCrypto, pure Rust, wasm-clean).
 sha2 = "0.10"
 

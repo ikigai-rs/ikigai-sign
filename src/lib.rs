@@ -1,5 +1,8 @@
-//! `ikigai-sign` — a capability-gated **Ed25519 signing + verification** module, where a
-//! signature is an **RDF graph** and keys are **kernel-resolved resources**.
+//! `ikigai-sign` — a capability-gated, **crypto-agile signing + verification** module, where a
+//! signature is an **RDF graph** and keys are **kernel-resolved resources**. Two algorithms
+//! today — **Ed25519** and **ES256** (ECDSA P-256, the algorithm the Secure Enclave and TPMs
+//! speak) — selected by the key and dispatched on `sig:algorithm`; a third is a new id plus a
+//! signer/verifier, never a restructure.
 //!
 //! Two endpoints, mounted by [`space`]:
 //!
@@ -45,13 +48,20 @@
 use async_trait::async_trait;
 use base64::Engine as _;
 use ed25519_dalek::pkcs8::{spki::DecodePublicKey, DecodePrivateKey};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+// The `signature` crate's traits, implemented by BOTH algorithms' keys — imported once and
+// used for Ed25519 and ES256 alike (this is the crypto-agility, at the trait level).
 use ikigai_core::{
     ArgSpec, Description, Endpoint, EndpointSpace, Error as CoreError, Exact, Invocation, Iri,
     ReprType, Representation, Request, Result as CoreResult, Verb,
 };
 use oxrdf::Term;
 use oxrdfio::{RdfFormat, RdfParser};
+use p256::ecdsa::signature::{Signer, Verifier};
+use p256::ecdsa::{
+    Signature as P256Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey,
+};
+use p256::pkcs8::EncodePublicKey;
 use sha2::{Digest, Sha256};
 
 /// The capability gating "may sign at all." Declared on `urn:sign:sign` via
@@ -78,8 +88,11 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 /// The RDF namespace, for the emitted `@prefix rdf:` line.
 const RDF_NS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
-/// The only algorithm this module signs/verifies with.
-const ALGORITHM: &str = "Ed25519";
+/// The signature-algorithm ids, as they appear in `sig:algorithm`. The whole module dispatches
+/// on this string — the crypto-agile contract — so a new algorithm is a new id plus a signer
+/// and verifier for it, never a restructure. The Secure Enclave speaks [`ALG_ES256`].
+const ALG_ED25519: &str = "Ed25519";
+const ALG_ES256: &str = "ES256";
 
 /// The signature-graph output media type.
 const MEDIA_TURTLE: &str = "text/turtle";
@@ -115,27 +128,93 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Parse PKCS8 Ed25519 **private** key material — PEM (if it is UTF-8 opening with a PEM
-/// armor) else DER. A clear message on any failure; never a panic.
-fn parse_signing_key(bytes: &[u8]) -> Result<SigningKey, String> {
-    if let Some(pem) = as_pem(bytes) {
-        SigningKey::from_pkcs8_pem(pem)
-            .map_err(|e| format!("not a valid PKCS8 Ed25519 private key (PEM): {e}"))
-    } else {
-        SigningKey::from_pkcs8_der(bytes)
-            .map_err(|e| format!("not a valid PKCS8 Ed25519 private key (DER): {e}"))
+/// A private signing key of a supported algorithm, parsed from PKCS8 (PEM or DER). The
+/// algorithm is DISCOVERED by which parser accepts the key — the sign path never assumes one.
+/// Add an algorithm by adding a variant and a parse attempt; the rest of sign is unchanged.
+enum AnySigner {
+    Ed25519(Box<SigningKey>),
+    Es256(Box<P256SigningKey>),
+}
+
+impl AnySigner {
+    /// Parse a PKCS8 private key, trying each supported algorithm. The PKCS8 AlgorithmIdentifier
+    /// OID makes this unambiguous — only the matching parser accepts the key.
+    fn parse(bytes: &[u8]) -> Result<AnySigner, String> {
+        let ed = match as_pem(bytes) {
+            Some(pem) => SigningKey::from_pkcs8_pem(pem),
+            None => SigningKey::from_pkcs8_der(bytes),
+        };
+        if let Ok(k) = ed {
+            return Ok(AnySigner::Ed25519(Box::new(k)));
+        }
+        let ec = match as_pem(bytes) {
+            Some(pem) => P256SigningKey::from_pkcs8_pem(pem),
+            None => P256SigningKey::from_pkcs8_der(bytes),
+        };
+        match ec {
+            Ok(k) => Ok(AnySigner::Es256(Box::new(k))),
+            Err(e) => Err(format!(
+                "not a PKCS8 Ed25519 or P-256 (ES256) private key (P-256 parse: {e})"
+            )),
+        }
+    }
+
+    /// The `sig:algorithm` id for this key.
+    fn algorithm(&self) -> &'static str {
+        match self {
+            AnySigner::Ed25519(_) => ALG_ED25519,
+            AnySigner::Es256(_) => ALG_ES256,
+        }
+    }
+
+    /// Sign `message`, returning `(base64 signature, base64 public key)` in this algorithm's
+    /// encoding. Ed25519 is UNCHANGED on the wire — a raw 32-byte public key and a 64-byte
+    /// signature. ES256 uses a 64-byte r‖s signature (the Enclave's DER output is normalised to
+    /// this at the sign-through boundary) and an SPKI-DER public key (self-describing).
+    fn sign(&self, message: &[u8]) -> Result<(String, String), String> {
+        match self {
+            AnySigner::Ed25519(k) => {
+                let sig: Signature = k.sign(message);
+                Ok((
+                    B64.encode(sig.to_bytes()),
+                    B64.encode(k.verifying_key().to_bytes()),
+                ))
+            }
+            AnySigner::Es256(k) => {
+                let sig: P256Signature = k.sign(message);
+                let spki = k
+                    .verifying_key()
+                    .to_public_key_der()
+                    .map_err(|e| format!("cannot encode the P-256 public key: {e}"))?;
+                Ok((B64.encode(sig.to_bytes()), B64.encode(spki.as_bytes())))
+            }
+        }
     }
 }
 
-/// Parse SPKI Ed25519 **public** key material — PEM (if it is UTF-8 opening with a PEM armor)
-/// else DER. A clear message on any failure; never a panic.
-fn parse_verifying_key(bytes: &[u8]) -> Result<VerifyingKey, String> {
-    if let Some(pem) = as_pem(bytes) {
-        VerifyingKey::from_public_key_pem(pem)
-            .map_err(|e| format!("not a valid SPKI Ed25519 public key (PEM): {e}"))
-    } else {
-        VerifyingKey::from_public_key_der(bytes)
-            .map_err(|e| format!("not a valid SPKI Ed25519 public key (DER): {e}"))
+/// This key's `sig:signer` encoding for the Ed25519 algorithm — the raw 32-byte public key,
+/// base64. Kept as a free function so the verify-side pre-check encodes identically to `sign`.
+fn ed25519_signer_b64(key: &VerifyingKey) -> String {
+    B64.encode(key.to_bytes())
+}
+
+/// Parse SPKI Ed25519 **public** key material — PEM or DER. Clear message on failure; no panic.
+fn parse_ed25519_public(bytes: &[u8]) -> Result<VerifyingKey, String> {
+    match as_pem(bytes) {
+        Some(pem) => VerifyingKey::from_public_key_pem(pem)
+            .map_err(|e| format!("not a valid SPKI Ed25519 public key (PEM): {e}")),
+        None => VerifyingKey::from_public_key_der(bytes)
+            .map_err(|e| format!("not a valid SPKI Ed25519 public key (DER): {e}")),
+    }
+}
+
+/// Parse SPKI P-256 **public** key material — PEM or DER. Clear message on failure; no panic.
+fn parse_p256_public(bytes: &[u8]) -> Result<P256VerifyingKey, String> {
+    match as_pem(bytes) {
+        Some(pem) => P256VerifyingKey::from_public_key_pem(pem)
+            .map_err(|e| format!("not a valid SPKI P-256 public key (PEM): {e}")),
+        None => P256VerifyingKey::from_public_key_der(bytes)
+            .map_err(|e| format!("not a valid SPKI P-256 public key (DER): {e}")),
     }
 }
 
@@ -150,17 +229,18 @@ fn as_pem(bytes: &[u8]) -> Option<&str> {
     }
 }
 
-/// Sign `message` with `signing_key`, returning the deterministic RDF **signature-graph** as
-/// canonical Turtle. Pure and deterministic: same `(message, key)` ⇒ byte-identical output.
-fn sign_to_graph(message: &[u8], signing_key: &SigningKey) -> String {
-    let signature: Signature = signing_key.sign(message);
-    let sig_b64 = B64.encode(signature.to_bytes());
-    let signer_b64 = B64.encode(signing_key.verifying_key().to_bytes());
+/// Sign `message` with `signer`, returning the deterministic RDF **signature-graph** as
+/// canonical Turtle. Pure and deterministic (both Ed25519 and ES256 sign deterministically):
+/// same `(message, key)` ⇒ byte-identical output. Algorithm-agnostic — it records whatever
+/// `signer` reports.
+fn sign_to_graph(message: &[u8], signer: &AnySigner) -> Result<String, String> {
+    let (sig_b64, signer_b64) = signer.sign(message)?;
+    let algorithm = signer.algorithm();
     let content_hash = content_hash_hex(message);
 
     // Skolemize: the node IRI is content-addressed on the (deterministic) signature bytes, so
     // the graph is stable and diffable and carries no blank node.
-    let node = format!("urn:sign:{}", to_hex(&Sha256::digest(signature.to_bytes())));
+    let node = format!("urn:sign:{}", to_hex(&Sha256::digest(sig_b64.as_bytes())));
 
     let mut out = String::new();
     out.push_str(&format!("@prefix rdf: <{RDF_NS}> .\n"));
@@ -168,7 +248,7 @@ fn sign_to_graph(message: &[u8], signing_key: &SigningKey) -> String {
     out.push_str(&format!("<{node}> rdf:type sig:Signature .\n"));
     out.push_str(&format!(
         "<{node}> sig:algorithm {} .\n",
-        turtle_string(ALGORITHM)
+        turtle_string(algorithm)
     ));
     out.push_str(&format!(
         "<{node}> sig:signer {} .\n",
@@ -182,7 +262,7 @@ fn sign_to_graph(message: &[u8], signing_key: &SigningKey) -> String {
         "<{node}> sig:contentHash {} .\n",
         turtle_string(&content_hash)
     ));
-    out
+    Ok(out)
 }
 
 /// Render a Rust string as a Turtle string literal, escaping the reserved characters so the
@@ -265,56 +345,38 @@ fn literal_value(term: &Term) -> Option<String> {
 
 /// The outcome of a verification: a clear valid/invalid verdict with a reason.
 enum Verdict {
-    Valid { signer_b64: String },
-    Invalid { reason: String },
+    Valid {
+        algorithm: String,
+        signer_b64: String,
+    },
+    Invalid {
+        reason: String,
+    },
 }
 
 impl Verdict {
     /// The `text/plain` rendering — `valid: …` / `invalid: …`.
     fn render(&self) -> String {
         match self {
-            Verdict::Valid { signer_b64 } => {
-                format!("valid: signed by {signer_b64} (algorithm {ALGORITHM})\n")
+            Verdict::Valid {
+                algorithm,
+                signer_b64,
+            } => {
+                format!("valid: signed by {signer_b64} (algorithm {algorithm})\n")
             }
             Verdict::Invalid { reason } => format!("invalid: {reason}\n"),
         }
     }
 }
 
-/// Verify `message` against a parsed signature-graph, using `verifying_key` (the caller's
-/// `key`). Returns a [`Verdict`] — a signature that simply doesn't check out is a normal
-/// `Invalid` answer, not an `Err`. `Err` is reserved for a graph the [`SigFields`] can't be
-/// turned into a signature (a shape problem, not a verdict).
-fn verify_message(
-    message: &[u8],
-    fields: &SigFields,
-    verifying_key: &VerifyingKey,
-) -> Result<Verdict, String> {
-    if fields.algorithm != ALGORITHM {
-        return Ok(Verdict::Invalid {
-            reason: format!(
-                "unsupported algorithm `{}` (this module verifies {ALGORITHM})",
-                fields.algorithm
-            ),
-        });
-    }
-
-    // Signer pre-check: if the graph names its `sig:signer` and it differs from the public key
-    // the caller provided, the signature was made for a DIFFERENT key — a clear, specific
-    // verdict (the Ed25519 check below would also fail, but less legibly).
-    let provided_signer = B64.encode(verifying_key.to_bytes());
-    if let Some(embedded) = &fields.signer_b64 {
-        if embedded != &provided_signer {
-            return Ok(Verdict::Invalid {
-                reason: format!(
-                    "provided public key ({provided_signer}) is not the graph's signer ({embedded})"
-                ),
-            });
-        }
-    }
-
-    // Content-hash pre-check: a clear, specific verdict when the bytes differ from what was
-    // signed (the Ed25519 check below would also fail, but less legibly).
+/// Verify `message` against a parsed signature-graph, using the caller's `key` bytes. Dispatch
+/// is on the graph's `sig:algorithm` — the crypto-agile seam — and the public key is parsed AS
+/// that algorithm, so a key/algorithm mismatch is a clear error. A signature that simply
+/// doesn't check out is a normal `Invalid` answer, not an `Err`; `Err` is reserved for a graph
+/// or key too malformed to turn into a verification (a shape problem, not a verdict).
+fn verify_message(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Result<Verdict, String> {
+    // Content-hash pre-check, algorithm-agnostic: a clear verdict when the bytes differ from
+    // what was signed (the crypto check below would also fail, but less legibly).
     let recomputed = content_hash_hex(message);
     if recomputed != fields.content_hash {
         return Ok(Verdict::Invalid {
@@ -325,27 +387,86 @@ fn verify_message(
         });
     }
 
-    // Decode the signature bytes. A malformed base64 / wrong-length signature is a shape
-    // problem with the graph → `Err`, not a verdict.
+    match fields.algorithm.as_str() {
+        ALG_ED25519 => verify_ed25519(message, fields, key_bytes),
+        ALG_ES256 => verify_es256(message, fields, key_bytes),
+        other => Ok(Verdict::Invalid {
+            reason: format!(
+                "unsupported algorithm `{other}` (this module verifies {ALG_ED25519}, {ALG_ES256})"
+            ),
+        }),
+    }
+}
+
+/// A `sig:signer` pre-check: if the graph names a signer and it differs from `provided`, the
+/// signature was made for a DIFFERENT key — a clear verdict (the crypto check would fail too,
+/// less legibly). `None` if it matches or is absent.
+fn signer_mismatch(fields: &SigFields, provided: &str) -> Option<Verdict> {
+    match &fields.signer_b64 {
+        Some(embedded) if embedded != provided => Some(Verdict::Invalid {
+            reason: format!(
+                "provided public key ({provided}) is not the graph's signer ({embedded})"
+            ),
+        }),
+        _ => None,
+    }
+}
+
+fn verify_ed25519(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Result<Verdict, String> {
+    let key = parse_ed25519_public(key_bytes)?;
+    let provided = ed25519_signer_b64(&key);
+    if let Some(v) = signer_mismatch(fields, &provided) {
+        return Ok(v);
+    }
     let sig_bytes = B64
         .decode(fields.value_b64.as_bytes())
         .map_err(|e| format!("sig:value is not valid base64: {e}"))?;
     let signature = Signature::from_slice(&sig_bytes)
         .map_err(|e| format!("sig:value is not a 64-byte Ed25519 signature: {e}"))?;
-
     // `verify_strict`, not `verify`: a signature is this crate's content-address
-    // (`urn:sign:{sha256(signature)}`), so verification must admit exactly ONE valid signature per
-    // (message, key). The permissive `verify` accepts small-order (weak) keys — a hole that lets a
-    // forged signature validate almost any message, minting a bogus `urn:sign:` node. `verify_strict`
-    // rejects small-order `A`/`R`; S-scalar canonicity is already enforced above by `from_slice`.
-    match verifying_key.verify_strict(message, &signature) {
-        Ok(()) => Ok(Verdict::Valid {
-            signer_b64: B64.encode(verifying_key.to_bytes()),
-        }),
-        Err(_) => Ok(Verdict::Invalid {
+    // (`urn:sign:{sha256(signature)}`), so verification must admit exactly ONE valid signature
+    // per (message, key). The permissive `verify` accepts small-order (weak) keys — a hole that
+    // lets a forged signature validate almost any message, minting a bogus `urn:sign:` node.
+    // `verify_strict` rejects small-order `A`/`R`; S-scalar canonicity is enforced by `from_slice`.
+    Ok(match key.verify_strict(message, &signature) {
+        Ok(()) => Verdict::Valid {
+            algorithm: ALG_ED25519.to_string(),
+            signer_b64: provided,
+        },
+        Err(_) => Verdict::Invalid {
             reason: "signature does not verify against the provided public key".to_string(),
-        }),
+        },
+    })
+}
+
+fn verify_es256(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Result<Verdict, String> {
+    let key = parse_p256_public(key_bytes)?;
+    let provided = p256_signer_b64(&key)?;
+    if let Some(v) = signer_mismatch(fields, &provided) {
+        return Ok(v);
     }
+    let sig_bytes = B64
+        .decode(fields.value_b64.as_bytes())
+        .map_err(|e| format!("sig:value is not valid base64: {e}"))?;
+    let signature = P256Signature::from_slice(&sig_bytes)
+        .map_err(|e| format!("sig:value is not a 64-byte P-256 (ES256) signature: {e}"))?;
+    Ok(match key.verify(message, &signature) {
+        Ok(()) => Verdict::Valid {
+            algorithm: ALG_ES256.to_string(),
+            signer_b64: provided,
+        },
+        Err(_) => Verdict::Invalid {
+            reason: "signature does not verify against the provided public key".to_string(),
+        },
+    })
+}
+
+/// The `sig:signer` encoding for a P-256 public key — SPKI DER, base64 — identical to what
+/// [`AnySigner::sign`] emits, so the verify-side pre-check compares like for like.
+fn p256_signer_b64(key: &P256VerifyingKey) -> Result<String, String> {
+    key.to_public_key_der()
+        .map(|d| B64.encode(d.as_bytes()))
+        .map_err(|e| format!("cannot encode the P-256 public key: {e}"))
 }
 
 // =====================================================================================
@@ -383,10 +504,11 @@ impl Endpoint for Sign {
             "bytes to sign (`in`)",
         )?;
         let key_repr = resolve_key(inv, "urn:sign:sign").await?;
-        let signing_key = parse_signing_key(&key_repr.bytes)
+        let signer = AnySigner::parse(&key_repr.bytes)
             .map_err(|e| CoreError::Endpoint(format!("urn:sign:sign: {e}")))?;
 
-        let graph = sign_to_graph(&message, &signing_key);
+        let graph = sign_to_graph(&message, &signer)
+            .map_err(|e| CoreError::Endpoint(format!("urn:sign:sign: {e}")))?;
         Ok(Representation::new(
             ReprType::new(MEDIA_TURTLE).with_param("charset", "utf-8"),
             graph.into_bytes(),
@@ -403,12 +525,13 @@ impl Endpoint for Sign {
 
     fn describe(&self) -> Description {
         Description::new("sign")
-            .title("Ed25519 sign (RDF signature-graph)")
+            .title("Sign (RDF signature-graph, Ed25519 or ES256)")
             .summary(
-                "Ed25519-sign bytes with a kernel-resolved PKCS8 private key, emitting a \
-                 DETERMINISTIC RDF signature-graph (text/turtle): a sig:Signature with \
-                 sig:algorithm, sig:signer (base64 pubkey), sig:value (base64 signature), and \
-                 sig:contentHash (hex SHA-256). Pass the bytes as `in` (or pipe them as \
+                "Sign bytes with a kernel-resolved PKCS8 private key, emitting a DETERMINISTIC \
+                 RDF signature-graph (text/turtle): a sig:Signature with sig:algorithm, \
+                 sig:signer (base64 pubkey), sig:value (base64 signature), and sig:contentHash \
+                 (hex SHA-256). The algorithm follows the key — Ed25519 or ES256 (ECDSA P-256, \
+                 the Secure-Enclave/TPM algorithm). Pass the bytes as `in` (or pipe them as \
                  `content`) and the private-key resource URI as `key=` (urn:/file: — resolved \
                  THROUGH the kernel, cap-scoped). No timestamp, so the graph is content-\
                  addressable; the node IRI is skolemized (urn:sign:<hash>), no blank nodes. \
@@ -458,10 +581,7 @@ impl Endpoint for Verify {
             .map_err(|e| CoreError::Endpoint(format!("urn:sign:verify: {e}")))?;
 
         let key_repr = resolve_key(inv, "urn:sign:verify").await?;
-        let verifying_key = parse_verifying_key(&key_repr.bytes)
-            .map_err(|e| CoreError::Endpoint(format!("urn:sign:verify: {e}")))?;
-
-        let verdict = verify_message(&message, &fields, &verifying_key)
+        let verdict = verify_message(&message, &fields, &key_repr.bytes)
             .map_err(|e| CoreError::Endpoint(format!("urn:sign:verify: {e}")))?;
 
         Ok(Representation::new(
@@ -479,16 +599,17 @@ impl Endpoint for Verify {
 
     fn describe(&self) -> Description {
         Description::new("verify")
-            .title("Ed25519 verify (RDF signature-graph)")
+            .title("Verify (RDF signature-graph, Ed25519 or ES256)")
             .summary(
                 "Verify bytes against an RDF signature-graph with a kernel-resolved SPKI public \
                  key. Pass the bytes as `in`, the signature-graph as `sig` (or pipe it as \
                  `content`), and the public-key resource URI as `key=` (resolved through the \
-                 kernel). It parses the graph, recomputes the SHA-256 content hash, and \
-                 Ed25519-verifies the signature against the public key. Output is text/plain — \
-                 `valid: signed by …` or `invalid: <reason>`. A signature that doesn't check \
-                 out is a normal `invalid` answer, not an error; only a malformed graph/key is \
-                 an error. Open — no capability required.",
+                 kernel). It parses the graph, recomputes the SHA-256 content hash, and — \
+                 dispatching on the graph's sig:algorithm — Ed25519- or ES256-verifies the \
+                 signature against the public key (parsed as that algorithm). Output is \
+                 text/plain — `valid: signed by …` or `invalid: <reason>`. A signature that \
+                 doesn't check out is a normal `invalid` answer, not an error; only a malformed \
+                 graph/key is an error. Open — no capability required.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)

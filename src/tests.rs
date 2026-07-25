@@ -20,6 +20,19 @@ const K2_PUB: &str = "-----BEGIN PUBLIC KEY-----\n\
 MCowBQYDK2VwAyEAi+9rQO2fsE5jSht+Wi2itGXQQx/or4ygbZ3CJqIC8wU=\n\
 -----END PUBLIC KEY-----\n";
 
+// A P-256 (ES256) keypair — PKCS8 private + SPKI public, PEM — from a fixed scalar, so the
+// ES256 tests are deterministic and RNG-free just like the Ed25519 ones. ES256 is the
+// algorithm the Secure Enclave speaks; here it is a software key exercising the same dispatch.
+const P256_PRIV: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgBwcHBwcHBwcHBwcH\n\
+BwcHBwcHBwcHBwcHBwcHBwcHBwehRANCAAQeGFMv1HVMAvMEHZx1zrM7g//YGsfO\n\
+T+iCzLHJi8WJbqRsMRxOL/QN2Wo2U+bkVEXTLf5Ibs7XXHqQxqGIgcCj\n\
+-----END PRIVATE KEY-----\n";
+const P256_PUB: &str = "-----BEGIN PUBLIC KEY-----\n\
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHhhTL9R1TALzBB2cdc6zO4P/2BrH\n\
+zk/ogsyxyYvFiW6kbDEcTi/0DdlqNlPm5FRF0y3+SG7O11x6kMahiIHAow==\n\
+-----END PUBLIC KEY-----\n";
+
 // ---- a static-bytes key endpoint, so a key resolves THROUGH the kernel -------------------
 
 /// An endpoint that serves fixed bytes — stands in for a `urn:file:*` / `urn:secret:*` key
@@ -55,7 +68,9 @@ fn kernel() -> Kernel {
     let space = space()
         .bind(Exact::new("urn:test:k1-priv"), StaticKey(K1_PRIV))
         .bind(Exact::new("urn:test:k1-pub"), StaticKey(K1_PUB))
-        .bind(Exact::new("urn:test:k2-pub"), StaticKey(K2_PUB));
+        .bind(Exact::new("urn:test:k2-pub"), StaticKey(K2_PUB))
+        .bind(Exact::new("urn:test:p256-priv"), StaticKey(P256_PRIV))
+        .bind(Exact::new("urn:test:p256-pub"), StaticKey(P256_PUB));
     Kernel::new(Arc::new(space))
 }
 
@@ -420,4 +435,66 @@ fn verify_describe_is_open_and_declares_args() {
             "verify declares `{expected}`"
         );
     }
+}
+// ---- ES256 (P-256) round trip and cross-algorithm -----------------------------------------
+
+#[test]
+fn es256_round_trip_sign_then_verify_is_valid() {
+    let k = kernel();
+    let message = b"a booking decision, signed in the Enclave one day";
+    let graph = sign(&k, message, "urn:test:p256-priv");
+    // The graph declares ES256 and is verifiable with the matching public key.
+    assert!(graph.contains(r#"sig:algorithm "ES256""#), "{graph}");
+    let verdict = verify(&k, message, &graph, "urn:test:p256-pub");
+    assert!(verdict.starts_with("valid:"), "{verdict}");
+    assert!(verdict.contains("algorithm ES256"), "{verdict}");
+}
+
+#[test]
+fn es256_signing_is_deterministic() {
+    // RFC-6979 deterministic ECDSA — the same (message, key) signs byte-identically, so the
+    // signature-graph stays content-addressable exactly like Ed25519.
+    let k = kernel();
+    let message = b"determinism keeps the graph content-addressable";
+    assert_eq!(
+        sign(&k, message, "urn:test:p256-priv"),
+        sign(&k, message, "urn:test:p256-priv")
+    );
+}
+
+#[test]
+fn es256_tampered_content_is_invalid() {
+    let k = kernel();
+    let graph = sign(&k, b"pay 100", "urn:test:p256-priv");
+    let verdict = verify(&k, b"pay 900", &graph, "urn:test:p256-pub");
+    assert!(verdict.starts_with("invalid:"), "{verdict}");
+}
+
+#[test]
+fn an_ed25519_key_cannot_verify_an_es256_signature() {
+    // Dispatch is on the graph's algorithm: an ES256 graph handed an Ed25519 public key is a
+    // clean error (the key won't parse as P-256), never a false "valid".
+    let k = kernel();
+    let graph = sign(&k, b"msg", "urn:test:p256-priv");
+    let out = block_on(k.issue(
+        verify_request(b"msg", &graph, "urn:test:k1-pub"),
+        &Capability::root(),
+    ));
+    // A key that isn't a P-256 SPKI is a shape error surfaced as an endpoint error.
+    assert!(
+        out.is_err()
+            || String::from_utf8(out.unwrap().bytes)
+                .unwrap()
+                .starts_with("invalid")
+    );
+}
+
+#[test]
+fn an_ed25519_signature_still_verifies_unchanged() {
+    // The whole point of dispatch: adding ES256 did not disturb Ed25519.
+    let k = kernel();
+    let graph = sign(&k, b"unchanged", "urn:test:k1-priv");
+    assert!(graph.contains(r#"sig:algorithm "Ed25519""#), "{graph}");
+    let verdict = verify(&k, b"unchanged", &graph, "urn:test:k1-pub");
+    assert!(verdict.contains("algorithm Ed25519"), "{verdict}");
 }
