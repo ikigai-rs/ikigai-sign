@@ -29,7 +29,7 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["std", 
 # DETERMINISTIC, so the signature-graph stays content-addressable exactly like Ed25519, and no
 # RNG is pulled. `pkcs8`+`pem` load a standard EC private (PKCS8) / public (SPKI) key. Pure Rust
 # ⇒ wasm-clean. The module dispatches on `sig:algorithm`, so adding this did not touch Ed25519.
-p256 = { version = "0.13", default-features = false, features = ["std", "ecdsa", "pkcs8", "pem"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "pem"] }
 
 # SHA-256 for `sig:contentHash` (RustCrypto, pure Rust, wasm-clean).
 sha2 = "0.10"
@@ -42,11 +42,15 @@ base64 = "0.22"
 oxrdf = "0.3"
 oxrdfio = "0.2"
 
-# oxrdf/oxrdfio pull getrandom 0.3; its wasm backend must be selected explicitly (paired with
-# the `getrandom_backend` cfg in .cargo/config.toml) so the lib still builds for wasm32 — the
-# crypto/endpoint surface is meant to run in the browser host too. Not used directly.
+# Two getrandom versions reach the wasm lib and each needs its wasm backend chosen, or the
+# `clippy (wasm lib)` gate won't compile. NEITHER is used at runtime — this crate never
+# generates randomness (signing is deterministic); these only satisfy the transitive backends.
+#  - 0.3, via oxrdf/oxrdfio: selected by the `getrandom_backend` cfg in .cargo/config.toml
+#    plus the `wasm_js` feature here.
+#  - 0.2, via p256 → rand_core (the elliptic-curve stack): selected by its `js` feature.
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint tests
