@@ -407,7 +407,8 @@ fn sign_describe_declares_cap_and_args() {
     };
     let d = resolved.endpoint.describe();
     assert!(d.verbs.contains(&Verb::Source));
-    // The declared capability the endpoint enforces (declared == enforced).
+    // The declared capability — the kernel enforces it before dispatch, and the endpoint
+    // re-checks it at entry (declared = enforced).
     assert!(
         d.requires.iter().any(|c| c == CAP_SIGN),
         "sign must declare {CAP_SIGN}; got {:?}",

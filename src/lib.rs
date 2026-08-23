@@ -65,8 +65,11 @@ use p256::pkcs8::EncodePublicKey;
 use sha2::{Digest, Sha256};
 
 /// The capability gating "may sign at all." Declared on `urn:sign:sign` via
-/// [`Description::requires`] and enforced at entry (the kernel does not yet enforce declared
-/// `requires` for bound endpoints, so the endpoint checks it — declared == enforced).
+/// [`Description::requires`], and so enforced by the kernel *before dispatch* (core 0.1.49
+/// onward: declared = enforced is the kernel's baseline, on the same predicate selection and
+/// `urn:kernel:validate` use). The endpoint re-checks it at entry as a second line — that
+/// check earns its keep only where no kernel gate ran, on a detached invocation or a module
+/// shim, and it costs one string comparison.
 pub const CAP_SIGN: &str = "urn:cap:sign";
 
 /// The signature vocabulary namespace. Self-contained in this crate (no `/ns` deploy).
@@ -482,15 +485,17 @@ pub fn space() -> EndpointSpace {
 }
 
 /// `urn:sign:sign` — Ed25519-sign `in` bytes with the `key` private key, emitting the RDF
-/// signature-graph. Requires `urn:cap:sign`, enforced at entry.
+/// signature-graph. Requires `urn:cap:sign` — kernel-enforced before dispatch, re-checked at
+/// entry (see [`CAP_SIGN`]).
 struct Sign;
 
 #[async_trait]
 impl Endpoint for Sign {
     async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
-        // Enforce the declared capability at entry — `requires` is descriptive; the kernel
-        // doesn't yet baseline-check a bound endpoint's declared authority, so we do. A typed
-        // `Denied` (permanent, never transient).
+        // The kernel has already refused a caller without `urn:cap:sign`, before dispatch
+        // and before any cache-serve. This entry check is the second line, for the paths
+        // where no kernel gate ran — a detached invocation, a module shim. A typed `Denied`
+        // (permanent, never transient).
         if !inv.capability.allows(CAP_SIGN) {
             return Err(CoreError::Denied(format!(
                 "urn:sign:sign requires the {CAP_SIGN} capability"
