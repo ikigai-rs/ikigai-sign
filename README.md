@@ -9,7 +9,7 @@ Two endpoints:
 
 | endpoint | verb | capability | in → out |
 |---|---|---|---|
-| `urn:sign:sign` | Source | **`urn:cap:sign`** (enforced at entry) | bytes + `key=<uri>` → an RDF signature-graph |
+| `urn:sign:sign` | Source | **`urn:cap:sign`** (declared = kernel-enforced) | bytes + `key=<uri>` → an RDF signature-graph |
 | `urn:sign:verify` | Source | open | bytes + `sig=<graph>` + `key=<pubkey>` → a verdict |
 
 Signing is authority, so it's capability-gated; verification uses only public
