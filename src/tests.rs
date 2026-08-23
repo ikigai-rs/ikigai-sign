@@ -246,7 +246,10 @@ fn signature_graph_parses_as_rdf_with_expected_triples() {
     // It re-parses as RDF and carries the four sig:* facts + the rdf:type.
     let fields = parse_sig_graph(&graph).expect("the sig-graph parses as RDF");
     assert_eq!(fields.algorithm, "Ed25519");
-    assert_eq!(fields.content_hash, content_hash_hex(msg));
+    assert_eq!(
+        fields.content_hash,
+        format!("sha256:{}", content_hash_hex(msg))
+    );
     assert!(fields.signer_b64.is_some(), "sig:signer is present");
     // sig:value decodes to a 64-byte Ed25519 signature.
     let sig_bytes = B64.decode(fields.value_b64.as_bytes()).unwrap();
@@ -498,4 +501,200 @@ fn an_ed25519_signature_still_verifies_unchanged() {
     assert!(graph.contains(r#"sig:algorithm "Ed25519""#), "{graph}");
     let verdict = verify(&k, b"unchanged", &graph, "urn:test:k1-pub");
     assert!(verdict.contains("algorithm Ed25519"), "{verdict}");
+}
+
+// ---- the tagged digest: emission, back-compat, and refusal ------------------------------
+//
+// `sig:contentHash` names its algorithm — `sha256:<hex>`. Three properties are worth an
+// executable statement, and only the first is about the new form: what is emitted, that what
+// was emitted BEFORE still verifies, and that a tag this module does not implement is refused
+// rather than quietly treated as SHA-256.
+
+/// The 2026-08-07 public-record signature-graph, VERBATIM from
+/// `ikigai-devtools/records/public-record-2026-08-07/ikigai-public-record.sig.ttl` — a real,
+/// published, detached Ed25519 signature over a PDF, produced by `urn:sign:sign` before digests
+/// were tagged. Its `sig:contentHash` is bare hex.
+///
+/// It is here as the shape of the compatibility promise: this exact literal must keep reading
+/// as a SHA-256 digest. The signed PDF itself is NOT vendored (it lives in a private repo and
+/// copying it here would republish it), so this fixture proves the parse and the digest
+/// interpretation on the genuine bytes of the graph, and
+/// [`an_untagged_pre_tag_graph_still_verifies`] proves the end-to-end verification on the same
+/// lexical form with a key this crate owns.
+const PUBLIC_RECORD_2026_08_07: &str = concat!(
+    "@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n",
+    "@prefix sig: <https://ikigai-rs.dev/ns/sign#> .\n",
+    "<urn:sign:7b6c919ef0728338c8507b8238c9acc16d65166290d66731af62e157d370ff0b> rdf:type sig:Signature .\n",
+    "<urn:sign:7b6c919ef0728338c8507b8238c9acc16d65166290d66731af62e157d370ff0b> sig:algorithm \"Ed25519\" .\n",
+    "<urn:sign:7b6c919ef0728338c8507b8238c9acc16d65166290d66731af62e157d370ff0b> sig:signer \"KWvlAFPnW2d+4J/VM9A8ej9Qi0gKB0UcguzVyjqsBy0=\" .\n",
+    "<urn:sign:7b6c919ef0728338c8507b8238c9acc16d65166290d66731af62e157d370ff0b> sig:value \"ssVA1iBRyim5Zv6rEGLLWp7OnEj7ftMraRterkJI0b6zEoIdpET1OyoIAK35pLB24erp+dMH93CIktu6OuK6DQ==\" .\n",
+    "<urn:sign:7b6c919ef0728338c8507b8238c9acc16d65166290d66731af62e157d370ff0b> sig:contentHash \"ec2a37cef8f7a15ef2b635adc6e82a989a33156100e63e70fa6dd0339f7de58e\" .\n",
+);
+
+/// The public key that record was signed under (`public-record.pub`), so the historical graph
+/// can be pushed through the real endpoint and not just the parser.
+const PUBLIC_RECORD_PUB: &str = "-----BEGIN PUBLIC KEY-----\n\
+MCowBQYDK2VwAyEAKWvlAFPnW2d+4J/VM9A8ej9Qi0gKB0UcguzVyjqsBy0=\n\
+-----END PUBLIC KEY-----\n";
+
+/// The digest of the PDF that record signs, as the record wrote it: bare hex, no tag.
+const PUBLIC_RECORD_HASH: &str = "ec2a37cef8f7a15ef2b635adc6e82a989a33156100e63e70fa6dd0339f7de58e";
+
+#[test]
+fn emitted_content_hash_is_tagged_sha256() {
+    let k = kernel();
+    let msg = b"tag the digest";
+    let graph = sign(&k, msg, "urn:test:k1-priv");
+
+    let fields = parse_sig_graph(&graph).expect("the sig-graph parses");
+    assert_eq!(
+        fields.content_hash,
+        format!("sha256:{}", content_hash_hex(msg)),
+        "sig:contentHash must name its algorithm"
+    );
+    assert!(
+        graph.contains(r#"sig:contentHash "sha256:"#),
+        "the tag must survive serialization, got: {graph}"
+    );
+    // And a tagged graph still verifies — the tag is not a separate dialect.
+    let verdict = verify(&k, msg, &graph, "urn:test:k1-pub");
+    assert!(verdict.starts_with("valid:"), "{verdict}");
+}
+
+#[test]
+fn es256_content_hash_is_tagged_too() {
+    let k = kernel();
+    let msg = b"tagged under es256";
+    let graph = sign(&k, msg, "urn:test:p256-priv");
+    assert!(
+        graph.contains(&format!(
+            r#"sig:contentHash "sha256:{}""#,
+            content_hash_hex(msg)
+        )),
+        "the digest tag is a property of the DIGEST, not of the signature algorithm: {graph}"
+    );
+    let verdict = verify(&k, msg, &graph, "urn:test:p256-pub");
+    assert!(verdict.starts_with("valid:"), "{verdict}");
+}
+
+/// ★ The back-compat guarantee, end-to-end: a signature-graph in the PRE-TAG lexical form —
+/// `sig:contentHash` as bare hex, exactly as the 2026-08-07 public record carries it — still
+/// verifies through the real endpoint. A change that broke this would not be a formatting
+/// change; it would repudiate every record already signed.
+#[test]
+fn an_untagged_pre_tag_graph_still_verifies() {
+    let k = kernel();
+    let msg = b"signed before digests were tagged";
+    let graph = sign(&k, msg, "urn:test:k1-priv");
+
+    // Strip the tag, reproducing byte-for-byte what this module used to emit.
+    let legacy = graph.replace(
+        &format!(r#"sig:contentHash "sha256:{}""#, content_hash_hex(msg)),
+        &format!(r#"sig:contentHash "{}""#, content_hash_hex(msg)),
+    );
+    assert_ne!(legacy, graph, "the tag must have been stripped");
+    assert!(
+        !legacy.contains("sha256:"),
+        "the legacy form carries no tag: {legacy}"
+    );
+
+    let verdict = verify(&k, msg, &legacy, "urn:test:k1-pub");
+    assert!(
+        verdict.starts_with("valid:"),
+        "an untagged (pre-0.2) signature-graph must still verify, got: {verdict}"
+    );
+}
+
+/// The genuine 2026-08-07 artifact, through the parser and the endpoint. Its untagged digest
+/// must be READ as SHA-256 — the proof is the reason line: the endpoint reaches the hash
+/// COMPARISON (and names the record's own digest as what was signed) instead of refusing the
+/// literal as an unknown algorithm. The signed PDF is not vendored here, so this is verified
+/// against different bytes and the expected answer is a mismatch, not a valid verdict.
+#[test]
+fn the_2026_08_07_public_record_still_reads_as_sha256() {
+    let fields = parse_sig_graph(PUBLIC_RECORD_2026_08_07).expect("the historical graph parses");
+    assert_eq!(fields.algorithm, "Ed25519");
+    assert_eq!(fields.content_hash, PUBLIC_RECORD_HASH, "bare hex, no tag");
+    assert_eq!(
+        content_hash_sha256_hex(&fields.content_hash),
+        Ok(PUBLIC_RECORD_HASH),
+        "an untagged digest is a SHA-256 digest"
+    );
+
+    let space = space().bind(
+        Exact::new("urn:test:public-record-pub"),
+        StaticKey(PUBLIC_RECORD_PUB),
+    );
+    let k = Kernel::new(Arc::new(space));
+    let verdict = verify(
+        &k,
+        b"not the public-record PDF",
+        PUBLIC_RECORD_2026_08_07,
+        "urn:test:public-record-pub",
+    );
+    assert!(
+        verdict.contains(&format!(
+            "content hash mismatch (signed {PUBLIC_RECORD_HASH}"
+        )),
+        "the historical untagged digest must reach the comparison, not be refused: {verdict}"
+    );
+}
+
+/// The tag must not become a way to SKIP the comparison: a correctly tagged digest whose hex
+/// is wrong still fails.
+#[test]
+fn a_tagged_hash_with_wrong_hex_still_fails() {
+    let k = kernel();
+    let msg = b"honest bytes";
+    let graph = sign(&k, msg, "urn:test:k1-priv");
+    let real = content_hash_hex(msg);
+    // Corrupt one hex digit, keeping the tag intact.
+    let corrupted: String = {
+        let mut c = real.clone();
+        let first = if c.starts_with('a') { 'b' } else { 'a' };
+        c.replace_range(0..1, &first.to_string());
+        c
+    };
+    let tampered = graph.replace(&format!("sha256:{real}"), &format!("sha256:{corrupted}"));
+    assert_ne!(tampered, graph, "the digest must have been corrupted");
+
+    let verdict = verify(&k, msg, &tampered, "urn:test:k1-pub");
+    assert!(
+        verdict.contains("content hash mismatch"),
+        "a tagged-but-wrong digest must still fail, got: {verdict}"
+    );
+}
+
+/// ★ An unknown tag is REFUSED, not assumed. The hex here is CORRECT — a verifier that merely
+/// stripped whatever tag it found would say `valid`, and the tag would be decoration. The
+/// signature itself is over the bytes and does check out, so nothing but this refusal stands
+/// between a `blake3:` digest and a confident `valid` on a comparison that never happened.
+#[test]
+fn an_unknown_hash_tag_is_refused_not_assumed() {
+    let k = kernel();
+    let msg = b"hashed with something else";
+    let graph = sign(&k, msg, "urn:test:k1-priv");
+    let mislabelled = graph.replace("sha256:", "blake3:");
+    assert!(mislabelled.contains("blake3:"), "{mislabelled}");
+
+    let verdict = verify(&k, msg, &mislabelled, "urn:test:k1-pub");
+    assert!(
+        verdict.starts_with("invalid:"),
+        "an unrecognised digest algorithm must not verify, got: {verdict}"
+    );
+    assert!(
+        verdict.contains("unsupported content-hash algorithm `blake3`"),
+        "and it must say WHY — a clear refusal, not a silent mismatch: {verdict}"
+    );
+}
+
+/// The digest-literal parser, stated directly: the three cases and their answers.
+#[test]
+fn content_hash_literal_parsing_is_total() {
+    assert_eq!(content_hash_sha256_hex("sha256:abc"), Ok("abc"));
+    assert_eq!(content_hash_sha256_hex("abc"), Ok("abc"), "pre-0.2 form");
+    assert_eq!(content_hash_sha256_hex("blake3:abc"), Err("blake3"));
+    assert_eq!(content_hash_sha256_hex(":abc"), Err(""), "empty tag");
+    // Case matters: exactly one spelling is emitted and exactly one is accepted.
+    assert_eq!(content_hash_sha256_hex("SHA256:abc"), Err("SHA256"));
 }

@@ -13,16 +13,19 @@
 //!    `key=urn:secret:…` works unchanged the moment a secrets backend exists. Output is a
 //!    **deterministic** RDF signature-graph (`text/turtle`): a `sig:Signature` with
 //!    `sig:algorithm`, `sig:signer` (base64 public key), `sig:value` (base64 signature), and
-//!    `sig:contentHash` (hex SHA-256 of the signed bytes). No timestamp — Ed25519 is
-//!    deterministic, so the same `(bytes, key)` yields byte-identical Turtle, and the graph is
+//!    `sig:contentHash` (**`sha256:<hex>`** — the digest names its algorithm, see
+//!    [`HASH_ALG_SHA256`]). No timestamp — Ed25519 is deterministic, so the same
+//!    `(bytes, key)` yields byte-identical Turtle, and the graph is
 //!    content-addressable/cacheable. The signature node is **skolemized** to a stable,
 //!    content-addressed IRI (`urn:sign:<hex>`); no blank nodes.
 //!
 //! 2. **`urn:sign:verify`** (Source, **open** — no capability) — verify bytes against a
 //!    signature-graph. Inputs: `in` = the bytes, `sig` = the signature-graph (piped `content`
 //!    fallback), `key` = the URI of a SPKI Ed25519 **public** key resource (kernel-resolved).
-//!    It parses the graph, recomputes the content hash of `in`, and Ed25519-verifies the
-//!    signature against the public key. Output is `text/plain`: a clear `valid` / `invalid`
+//!    It parses the graph, recomputes the content hash of `in` and compares it to the graph's
+//!    `sig:contentHash` (an UNTAGGED digest is read as SHA-256, so records signed before the
+//!    tag existed still verify; an unrecognised tag is refused, never assumed), then
+//!    Ed25519-verifies the signature against the public key. Output is `text/plain`: a clear `valid` / `invalid`
 //!    verdict. A signature that simply does not check out is **not an error** — it is a `valid:
 //!    …` / `invalid: …` answer (`Ok`); only a malformed graph / unreadable key / missing field
 //!    is an `Err`. Never panics on hostile input.
@@ -37,11 +40,16 @@
 //!
 //! ## The `sig:` vocabulary
 //!
-//! Self-contained in this crate under `https://ikigai-rs.dev/ns/sign#` (see [`SIG_NS`]). It is
-//! deliberately **not** part of the shared `ikigai-rs.dev/ns` vocabulary and needs no `/ns`
-//! deploy: the signature-graph shape has no second consumer yet. If one appears, the
-//! `sig:Signature` / `sig:algorithm` / `sig:signer` / `sig:value` / `sig:contentHash` terms are
-//! the ones to promote into the published vocab.
+//! Self-contained in this crate under `https://ikigai-rs.dev/ns/sign#` (see [`SIG_NS`]), and
+//! deliberately **not** part of the shared `ikigai-rs.dev/ns` vocabulary — so no `/ns` deploy
+//! is owed. The `sig:Signature` / `sig:algorithm` / `sig:signer` / `sig:value` /
+//! `sig:contentHash` terms are the ones to promote if it graduates.
+//!
+//! **A second producer exists** as of 2026-08-23: `ikigai-log`'s `#seal` lines carry
+//! `sig:contentHash` / `sig:value` rather than minting parallel terms. That is exactly why the
+//! digest here is tagged (`sha256:<hex>`) — sharing a predicate while writing two lexical forms
+//! of the same value means the two never join in a query, which is a silent failure, not a
+//! loud one.
 
 #![forbid(unsafe_code)]
 
@@ -83,8 +91,25 @@ const SIG_ALGORITHM: &str = "https://ikigai-rs.dev/ns/sign#algorithm";
 const SIG_SIGNER: &str = "https://ikigai-rs.dev/ns/sign#signer";
 /// `sig:value` — the base64-encoded 64-byte Ed25519 signature.
 const SIG_VALUE: &str = "https://ikigai-rs.dev/ns/sign#value";
-/// `sig:contentHash` — the hex-encoded SHA-256 of the signed bytes.
+/// `sig:contentHash` — the **algorithm-tagged** digest of the signed bytes: `sha256:<hex>`.
 const SIG_CONTENT_HASH: &str = "https://ikigai-rs.dev/ns/sign#contentHash";
+
+/// The digest-algorithm tag every emitted `sig:contentHash` carries — `sha256:<hex>`.
+///
+/// A digest that escapes the process names its algorithm, because a bare hex string is a
+/// permanent, unrecoverable commitment to one hash function: nothing in the graph says what
+/// produced it, and a verifier years later can only guess. The tag is a TEXT prefix (not
+/// multihash bytes) so the literal stays greppable and joins by string equality with the same
+/// predicate written elsewhere — `ikigai-log`'s seals carry `sig:contentHash` too, tagged.
+///
+/// Exactly one spelling is emitted and exactly one is accepted: lowercase `sha256:`. An
+/// untagged literal is the pre-0.2 form and reads as SHA-256 (verification accepts it, for
+/// back-compat with records signed before the tag existed); any OTHER tag is refused rather
+/// than assumed.
+///
+/// Public so a second producer of `sig:contentHash` writes the tag from THIS definition rather
+/// than from a copy of the string.
+pub const HASH_ALG_SHA256: &str = "sha256";
 
 /// `rdf:type`.
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -114,10 +139,35 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 // kernel-free and total (never panic). The endpoints below are the only kernel-aware layer.
 // =====================================================================================
 
-/// The lowercase-hex SHA-256 of `bytes` — the value of `sig:contentHash`.
+/// The lowercase-hex SHA-256 of `bytes` — the digest itself, untagged.
 fn content_hash_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     to_hex(&digest)
+}
+
+/// The value written to `sig:contentHash`: the SHA-256 of `bytes`, **tagged** — `sha256:<hex>`.
+fn tagged_content_hash(bytes: &[u8]) -> String {
+    format!("{HASH_ALG_SHA256}:{}", content_hash_hex(bytes))
+}
+
+/// Read a `sig:contentHash` literal as a SHA-256 hex digest, or say why it cannot be.
+///
+/// Three cases, and the middle one is the whole point of tagging:
+///
+/// * `sha256:<hex>` — the current form; the hex is returned.
+/// * `<hex>` with no tag — a **pre-0.2 graph**, from before digests were tagged. SHA-256 was
+///   the only algorithm this module ever emitted, so reading it as SHA-256 recovers exactly
+///   what the producer meant. This is the back-compat path, and it is load-bearing: real
+///   signed records exist in that form and must keep verifying.
+/// * any other tag (`blake3:…`) — `Err(tag)`. The caller REFUSES. Verifying a blake3 digest
+///   as SHA-256 would make the tag decorative — worse than no tag, because it would mint a
+///   confident `valid` verdict on a comparison that never happened.
+fn content_hash_sha256_hex(literal: &str) -> Result<&str, &str> {
+    match literal.split_once(':') {
+        None => Ok(literal),
+        Some((tag, hex)) if tag == HASH_ALG_SHA256 => Ok(hex),
+        Some((tag, _)) => Err(tag),
+    }
 }
 
 /// Lowercase hex of a byte slice (no dependency, deterministic).
@@ -239,7 +289,7 @@ fn as_pem(bytes: &[u8]) -> Option<&str> {
 fn sign_to_graph(message: &[u8], signer: &AnySigner) -> Result<String, String> {
     let (sig_b64, signer_b64) = signer.sign(message)?;
     let algorithm = signer.algorithm();
-    let content_hash = content_hash_hex(message);
+    let content_hash = tagged_content_hash(message);
 
     // Skolemize: the node IRI is content-addressed on the (deterministic) signature bytes, so
     // the graph is stable and diffable and carries no blank node.
@@ -378,13 +428,31 @@ impl Verdict {
 /// doesn't check out is a normal `Invalid` answer, not an `Err`; `Err` is reserved for a graph
 /// or key too malformed to turn into a verification (a shape problem, not a verdict).
 fn verify_message(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Result<Verdict, String> {
-    // Content-hash pre-check, algorithm-agnostic: a clear verdict when the bytes differ from
-    // what was signed (the crypto check below would also fail, but less legibly).
+    // Content-hash pre-check, signature-algorithm-agnostic: a clear verdict when the bytes
+    // differ from what was signed (the crypto check below would also fail, but less legibly).
+    //
+    // The graph's digest names its own algorithm (`sha256:<hex>`), so compare like with like:
+    // strip the tag, then compare hex to hex. An untagged literal is a pre-0.2 graph and reads
+    // as SHA-256; an unrecognised tag STOPS here with a verdict rather than falling through to
+    // the crypto check — a signature verifies the BYTES, so it would happily say `valid` on a
+    // digest this module never checked, and the tag would be decoration.
     let recomputed = content_hash_hex(message);
-    if recomputed != fields.content_hash {
+    let signed_hex = match content_hash_sha256_hex(&fields.content_hash) {
+        Ok(hex) => hex,
+        Err(tag) => {
+            return Ok(Verdict::Invalid {
+                reason: format!(
+                    "unsupported content-hash algorithm `{tag}` in sig:contentHash \
+                     (this module computes {HASH_ALG_SHA256}); refusing to assume it is \
+                     {HASH_ALG_SHA256}"
+                ),
+            })
+        }
+    };
+    if recomputed != signed_hex {
         return Ok(Verdict::Invalid {
             reason: format!(
-                "content hash mismatch (signed {}, got {recomputed})",
+                "content hash mismatch (signed {}, got {HASH_ALG_SHA256}:{recomputed})",
                 fields.content_hash
             ),
         });
@@ -535,7 +603,7 @@ impl Endpoint for Sign {
                 "Sign bytes with a kernel-resolved PKCS8 private key, emitting a DETERMINISTIC \
                  RDF signature-graph (text/turtle): a sig:Signature with sig:algorithm, \
                  sig:signer (base64 pubkey), sig:value (base64 signature), and sig:contentHash \
-                 (hex SHA-256). The algorithm follows the key — Ed25519 or ES256 (ECDSA P-256, \
+                 (the digest, TAGGED with its algorithm: sha256:<hex>). The algorithm follows the key — Ed25519 or ES256 (ECDSA P-256, \
                  the Secure-Enclave/TPM algorithm). Pass the bytes as `in` (or pipe them as \
                  `content`) and the private-key resource URI as `key=` (urn:/file: — resolved \
                  THROUGH the kernel, cap-scoped). No timestamp, so the graph is content-\
@@ -609,7 +677,9 @@ impl Endpoint for Verify {
                 "Verify bytes against an RDF signature-graph with a kernel-resolved SPKI public \
                  key. Pass the bytes as `in`, the signature-graph as `sig` (or pipe it as \
                  `content`), and the public-key resource URI as `key=` (resolved through the \
-                 kernel). It parses the graph, recomputes the SHA-256 content hash, and — \
+                 kernel). It parses the graph, recomputes the content hash and compares it to \
+                 the graph's sig:contentHash (sha256:<hex>; an untagged hex digest is read as \
+                 SHA-256 for pre-0.2 graphs, any other tag is refused), and — \
                  dispatching on the graph's sig:algorithm — Ed25519- or ES256-verifies the \
                  signature against the public key (parsed as that algorithm). Output is \
                  text/plain — `valid: signed by …` or `invalid: <reason>`. A signature that \

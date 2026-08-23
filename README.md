@@ -38,8 +38,19 @@ to [`ikigai-secret`](https://github.com/ikigai-rs/ikigai-secret). Keys are stand
   sig:algorithm  "Ed25519" ;
   sig:signer     "<base64 public key>" ;
   sig:value      "<base64 signature>" ;
-  sig:contentHash "<sha-256 of the signed bytes>" .
+  sig:contentHash "sha256:<hex digest of the signed bytes>" .
 ```
+
+**The digest names its algorithm.** `sig:contentHash` is `sha256:<hex>`, not bare
+hex: a signature-graph is meant to be checkable by a stranger years from now, and a
+naked digest is an unrecoverable commitment to one hash function. The tag is a text
+prefix, so the literal stays greppable and joins by string equality with the same
+predicate written elsewhere — [`ikigai-log`](https://github.com/ikigai-rs/ikigai-log)
+seals carry `sig:contentHash` too.
+
+Verification accepts an **untagged** digest as SHA-256, so graphs signed before
+0.2.0 keep verifying; a tag this crate does not implement (`blake3:…`) is **refused**
+rather than assumed — otherwise the tag would be decoration.
 
 Because it's a graph it lives in the RDF fabric — composes with content-addressed
 code-graphs ([`ikigai-sexpr`](https://github.com/ikigai-rs/ikigai-sexpr)), the log,
@@ -54,7 +65,7 @@ recomputed content hash — the embedded `sig:signer` is informational only:
 
 ```text
 valid: signed by <base64> (algorithm Ed25519)
-invalid: content hash mismatch (signed …, got …)
+invalid: content hash mismatch (signed sha256:…, got sha256:…)
 invalid: provided public key (…) is not the graph's signer (…)
 ```
 
