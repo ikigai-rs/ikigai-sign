@@ -13,7 +13,14 @@ Two endpoints:
 | `urn:sign:verify` | Source | open | bytes + `sig=<graph>` + `key=<pubkey>` → a verdict |
 
 Signing is authority, so it's capability-gated; verification uses only public
-keys, so it's open. The scheme is **Ed25519** (small, fast, deterministic).
+keys, so it's open.
+
+**Two algorithms, and the caller never picks one.** **Ed25519** (small, fast,
+deterministic) and, since 0.2.0, **ES256** (ECDSA P-256 — what the Secure Enclave,
+TPMs, and WebAuthn speak). On the sign side the algorithm is discovered from the
+key; on the verify side it is read from the graph's `sig:algorithm` and dispatched
+on. Both sign deterministically, so neither costs the content-addressability below.
+A third algorithm is a new id plus a signer and a verifier — never a restructure.
 
 ## Keys are resources
 
@@ -27,19 +34,26 @@ sign key=urn:secret:signing-key   # a Keychain/HSM-backed secret tomorrow (no ch
 
 The signer holds no key material of its own — key custody (and generation) belong
 to [`ikigai-secret`](https://github.com/ikigai-rs/ikigai-secret). Keys are standard
-**PKCS8** (private) / **SPKI** (public), PEM or DER (auto-detected), so
-`openssl genpkey -algorithm ed25519` produces a usable key with no bespoke tooling.
+**PKCS8** (private) / **SPKI** (public), PEM or DER (auto-detected), so both
+`openssl genpkey -algorithm ed25519` and `openssl ecparam -name prime256v1 -genkey`
+produce usable keys with no bespoke tooling — and which one you handed over is
+decided by the PKCS8 AlgorithmIdentifier, not by an argument you have to remember.
 
 ## The signature is a graph
 
 ```turtle
 @prefix sig: <https://ikigai-rs.dev/ns/sign#> .
 <urn:sign:1fcc…> a sig:Signature ;
-  sig:algorithm  "Ed25519" ;
+  sig:algorithm  "Ed25519" ;                # or "ES256"
   sig:signer     "<base64 public key>" ;
   sig:value      "<base64 signature>" ;
   sig:contentHash "sha256:<hex digest of the signed bytes>" .
 ```
+
+**Read `sig:algorithm` before reading the other two.** `sig:signer` is in that
+algorithm's own encoding — a raw 32-byte key for Ed25519, an SPKI DER document for
+ES256 — and `sig:value` is 64 bytes for both (`R‖S` and fixed-width `r‖s`
+respectively, never DER), so neither length tells you which you have.
 
 **The digest names its algorithm.** `sig:contentHash` is `sha256:<hex>`, not bare
 hex: a signature-graph is meant to be checkable by a stranger years from now, and a
