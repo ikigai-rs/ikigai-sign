@@ -587,15 +587,17 @@ fn an_untagged_pre_tag_graph_still_verifies() {
     let msg = b"signed before digests were tagged";
     let graph = sign(&k, msg, "urn:test:k1-priv");
 
-    // Strip the tag, reproducing byte-for-byte what this module used to emit.
+    // Strip the tag from the DIGEST LITERAL, reproducing what this module used to emit there.
+    // (The node IRI carries a `sha256:` of its own since 0.2.1 — a different tag on a
+    // different digest, stripped by `strip_node_tag` in the old-form test below.)
     let legacy = graph.replace(
         &format!(r#"sig:contentHash "sha256:{}""#, content_hash_hex(msg)),
         &format!(r#"sig:contentHash "{}""#, content_hash_hex(msg)),
     );
     assert_ne!(legacy, graph, "the tag must have been stripped");
     assert!(
-        !legacy.contains("sha256:"),
-        "the legacy form carries no tag: {legacy}"
+        legacy.contains(&format!(r#"sig:contentHash "{}""#, content_hash_hex(msg))),
+        "the legacy digest carries no tag: {legacy}"
     );
 
     let verdict = verify(&k, msg, &legacy, "urn:test:k1-pub");
@@ -674,8 +676,16 @@ fn an_unknown_hash_tag_is_refused_not_assumed() {
     let k = kernel();
     let msg = b"hashed with something else";
     let graph = sign(&k, msg, "urn:test:k1-priv");
-    let mislabelled = graph.replace("sha256:", "blake3:");
-    assert!(mislabelled.contains("blake3:"), "{mislabelled}");
+    // Only the DIGEST is mislabelled — the node IRI's own tag is left alone, so this test
+    // says something about `sig:contentHash` and nothing about the identifier.
+    let mislabelled = graph.replace(
+        &format!(r#"sig:contentHash "sha256:{}""#, content_hash_hex(msg)),
+        &format!(r#"sig:contentHash "blake3:{}""#, content_hash_hex(msg)),
+    );
+    assert!(
+        mislabelled.contains(r#"sig:contentHash "blake3:"#),
+        "{mislabelled}"
+    );
 
     let verdict = verify(&k, msg, &mislabelled, "urn:test:k1-pub");
     assert!(
@@ -697,4 +707,130 @@ fn content_hash_literal_parsing_is_total() {
     assert_eq!(content_hash_sha256_hex(":abc"), Err(""), "empty tag");
     // Case matters: exactly one spelling is emitted and exactly one is accepted.
     assert_eq!(content_hash_sha256_hex("SHA256:abc"), Err("SHA256"));
+}
+
+// ---- the tagged identifier: derivation, both algorithms, and the old form -----------------
+//
+// The signature node's IRI is `urn:sign:sha256:<hex>` — the digest that addresses it names
+// itself, exactly as `sig:contentHash` does. Three things are worth stating executably: WHAT
+// the name is derived from (unchanged, and load-bearing), that both algorithms mint the tagged
+// form, and that a graph carrying the OLD bare-hex name still verifies. The last is the
+// guarantee: an identifier that changed shape would be a migration if anything read it, and
+// nothing does.
+
+/// The subject IRI of the single `sig:Signature` in an emitted graph.
+fn node_iri(graph: &str) -> &str {
+    let start = graph
+        .find("<urn:sign:")
+        .expect("the graph names a signature node")
+        + 1;
+    let rest = &graph[start..];
+    &rest[..rest.find('>').expect("the IRI is closed")]
+}
+
+/// ★ The property the tag must NOT disturb: the node is content-addressed ON THE SIGNATURE.
+/// `sha256(base64 sig:value)` is what names it — before the tag and after — because that is
+/// what makes the name unforgeable: verification admits exactly one valid signature per
+/// (message, key) (`verify_strict`; see
+/// [`weak_key_forgery_is_rejected_though_permissive_verify_accepts`]), so exactly one node IRI
+/// can be minted for a signed fact. Address it on anything weaker — the message, the signer —
+/// and a forgery mints a name that says a thing that was never signed.
+///
+/// Nothing pinned this derivation before 0.2.1 — the previous assertion was only that the IRI
+/// starts `urn:sign:` — and it moved once unnoticed because of that: 0.1.0 hashed the RAW
+/// signature bytes, 0.2.0's crypto-agility refactor hashed the base64 TEXT of them instead
+/// (the 2026-08-07 public record is named under the older preimage, `7b6c919e…`, where this
+/// code would mint `fbb203be…`). Both name the same signature, and no reader compares the two,
+/// so nothing broke; the point of this test is that the next move cannot be silent.
+#[test]
+fn the_node_iri_is_tagged_and_still_addresses_the_signature() {
+    let k = kernel();
+    let msg = b"name the digest that names the node";
+    let graph = sign(&k, msg, "urn:test:k1-priv");
+    let fields = parse_sig_graph(&graph).expect("the sig-graph parses");
+
+    let node = node_iri(&graph);
+    let expected_hex = to_hex(&Sha256::digest(fields.value_b64.as_bytes()));
+    assert_eq!(
+        node,
+        format!("urn:sign:{HASH_ALG_SHA256}:{expected_hex}"),
+        "the node names its digest algorithm AND is still sha256(base64 signature)"
+    );
+
+    // Said the other way round, so a future edit to either half fails loudly: the tag is a
+    // prefix on the SAME hex the untagged form carried.
+    assert!(node.starts_with("urn:sign:sha256:"), "{node}");
+    assert_eq!(
+        node.trim_start_matches("urn:sign:sha256:"),
+        expected_hex,
+        "the tag was added to the name, not to what the name is derived from"
+    );
+}
+
+/// The tagged name does not collide with the module's own `Exact` bindings, and is positively
+/// distinguishable from them rather than merely accidentally distinct — everything under
+/// `urn:sign:sha256:` is a signature node, `urn:sign:sign` / `urn:sign:verify` are endpoints.
+#[test]
+fn a_signature_node_never_collides_with_the_endpoint_iris() {
+    let k = kernel();
+    let graph = sign(&k, b"neighbourhood check", "urn:test:k1-priv");
+    let node = node_iri(&graph);
+    assert_ne!(node, "urn:sign:sign");
+    assert_ne!(node, "urn:sign:verify");
+    Iri::parse(node).expect("the minted node is a well-formed IRI");
+}
+
+/// Both algorithms mint the tagged form — the digest that addresses the node is SHA-256
+/// whichever algorithm signed, so the tag is a property of the addressing, not of the
+/// signature algorithm (the same split as `sig:contentHash`).
+#[test]
+fn es256_mints_the_tagged_node_too() {
+    let k = kernel();
+    let msg = b"tagged identifier under es256";
+    let graph = sign(&k, msg, "urn:test:p256-priv");
+    let fields = parse_sig_graph(&graph).expect("the sig-graph parses");
+    assert_eq!(fields.algorithm, "ES256");
+    assert_eq!(
+        node_iri(&graph),
+        format!(
+            "urn:sign:{HASH_ALG_SHA256}:{}",
+            to_hex(&Sha256::digest(fields.value_b64.as_bytes()))
+        )
+    );
+}
+
+/// ★ The back-compat guarantee for the NAME, end-to-end through the kernel: a graph whose
+/// subject is the old bare-hex `urn:sign:<hex>` still verifies. It holds because
+/// [`parse_sig_graph`] never reads the subject — this test is what makes that an explicit
+/// promise rather than an implication of the current implementation, so a future parser that
+/// started matching on the node would fail here instead of silently repudiating every
+/// signature-graph written before 0.2.1. (The genuine 2026-08-07 public record carries exactly
+/// this form and reaches the endpoint too — see
+/// [`the_2026_08_07_public_record_still_reads_as_sha256`].)
+#[test]
+fn an_old_form_bare_hex_node_still_verifies() {
+    let k = kernel();
+    let msg = b"named before identifiers were tagged";
+    let graph = sign(&k, msg, "urn:test:k1-priv");
+
+    // Reproduce the pre-0.2.1 name: strip the tag from the SUBJECT only.
+    let old_form = graph.replace("<urn:sign:sha256:", "<urn:sign:");
+    assert_ne!(old_form, graph, "the node tag must have been stripped");
+    assert!(
+        node_iri(&old_form).starts_with("urn:sign:")
+            && !node_iri(&old_form).starts_with("urn:sign:sha256:"),
+        "the old form is a bare hex name: {}",
+        node_iri(&old_form)
+    );
+    // The digest literal is untouched — this test is about the NAME alone.
+    assert!(old_form.contains(&format!(
+        r#"sig:contentHash "sha256:{}""#,
+        content_hash_hex(msg)
+    )));
+
+    let verdict = verify(&k, msg, &old_form, "urn:test:k1-pub");
+    assert!(
+        verdict.starts_with("valid:"),
+        "a pre-0.2.1 bare-hex node must still verify, got: {verdict}"
+    );
 }

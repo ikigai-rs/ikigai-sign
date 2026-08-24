@@ -18,8 +18,9 @@
 //!    [`HASH_ALG_SHA256`]). No timestamp — both algorithms sign deterministically (Ed25519 by
 //!    construction, ES256 via RFC 6979), so the same
 //!    `(bytes, key)` yields byte-identical Turtle, and the graph is
-//!    content-addressable/cacheable. The signature node is **skolemized** to a stable,
-//!    content-addressed IRI (`urn:sign:<hex>`); no blank nodes.
+//!    content-addressable/cacheable. The signature node is **skolemized** to a stable IRI
+//!    content-addressed on the signature and **tagged with the digest algorithm that
+//!    addressed it** — `urn:sign:sha256:<hex>` (see [`HASH_ALG_SHA256`]); no blank nodes.
 //!
 //! 2. **`urn:sign:verify`** (Source, **open** — no capability) — verify bytes against a
 //!    signature-graph. Inputs: `in` = the bytes, `sig` = the signature-graph (piped `content`
@@ -32,7 +33,10 @@
 //!    public key. Output is `text/plain`: a clear `valid` / `invalid`
 //!    verdict. A signature that simply does not check out is **not an error** — it is a `valid:
 //!    …` / `invalid: …` answer (`Ok`); only a malformed graph / unreadable key / missing field
-//!    is an `Err`. Never panics on hostile input.
+//!    is an `Err`. Never panics on hostile input. **The node's IRI is never read** — see
+//!    [`parse_sig_graph`] — so a graph minted under either spelling of the name verifies the
+//!    same way, and the tagging of the identifier in 0.2.1 was a discontinuity in a naming
+//!    scheme, not a migration.
 //!
 //! ## Keys
 //!
@@ -112,7 +116,9 @@ const SIG_VALUE: &str = "https://ikigai-rs.dev/ns/sign#value";
 /// `sig:contentHash` — the **algorithm-tagged** digest of the signed bytes: `sha256:<hex>`.
 const SIG_CONTENT_HASH: &str = "https://ikigai-rs.dev/ns/sign#contentHash";
 
-/// The digest-algorithm tag every emitted `sig:contentHash` carries — `sha256:<hex>`.
+/// The digest-algorithm tag every emitted digest carries — in `sig:contentHash`
+/// (`sha256:<hex>`) and, since 0.2.1, in the signature node's own IRI
+/// (`urn:sign:sha256:<hex>`).
 ///
 /// A digest that escapes the process names its algorithm, because a bare hex string is a
 /// permanent, unrecoverable commitment to one hash function: nothing in the graph says what
@@ -124,6 +130,10 @@ const SIG_CONTENT_HASH: &str = "https://ikigai-rs.dev/ns/sign#contentHash";
 /// untagged literal is the pre-0.2 form and reads as SHA-256 (verification accepts it, for
 /// back-compat with records signed before the tag existed); any OTHER tag is refused rather
 /// than assumed.
+///
+/// An IDENTIFIER made of an untagged digest is the same commitment, only harder to walk back:
+/// a literal can be rewritten by a later producer, but a name is quoted, stored and referred
+/// to elsewhere. So the node IRI carries the tag as well — see [`sign_to_graph`].
 ///
 /// Public so a second producer of `sig:contentHash` writes the tag from THIS definition rather
 /// than from a copy of the string.
@@ -310,8 +320,33 @@ fn sign_to_graph(message: &[u8], signer: &AnySigner) -> Result<String, String> {
     let content_hash = tagged_content_hash(message);
 
     // Skolemize: the node IRI is content-addressed on the (deterministic) signature bytes, so
-    // the graph is stable and diffable and carries no blank node.
-    let node = format!("urn:sign:{}", to_hex(&Sha256::digest(sig_b64.as_bytes())));
+    // the graph is stable and diffable and carries no blank node. WHAT it is derived from —
+    // sha256 over the BASE64 TEXT of the signature — is load-bearing (see `verify_ed25519`:
+    // verification must admit exactly one valid signature per (message, key), or this name is
+    // forgeable), and the tag does not touch it: 0.2.1 added an algorithm label to the name,
+    // it did not re-derive the name. A name is a harder commitment than a literal — a literal
+    // can be rewritten by a later producer, a name is quoted and pointed at — so the digest
+    // that addresses the node says which digest it is, exactly as `sig:contentHash` does.
+    //
+    // ⚠ The PREIMAGE is the base64 text, not the raw signature bytes, and that is an
+    // encoding-dependent choice made by accident: 0.1.0 hashed `signature.to_bytes()`, and the
+    // crypto-agility refactor in 0.2.0 moved to the base64 string without noticing, because
+    // nothing pinned the derivation and nothing reads the subject. The 2026-08-07 public
+    // record's node (`7b6c919e…`) is sha256 of that record's RAW signature bytes; this code
+    // would mint `fbb203be…` for the same signature. Both name the same signature, so nothing
+    // broke — but changing the base64 alphabet or padding would move every future name again.
+    // `the_node_iri_is_tagged_and_still_addresses_the_signature` now pins whichever preimage
+    // is in force, so the next such move has to be deliberate.
+    //
+    // The `sha256:` segment does not collide with the module's own `Exact` bindings
+    // (`urn:sign:sign`, `urn:sign:verify`) — a hex digest never could either, but a tagged
+    // name is positively distinguishable rather than merely accidentally distinct: everything
+    // under `urn:sign:<alg>:` is a signature node, everything else under `urn:sign:` is an
+    // endpoint.
+    let node = format!(
+        "urn:sign:{HASH_ALG_SHA256}:{}",
+        to_hex(&Sha256::digest(sig_b64.as_bytes()))
+    );
 
     let mut out = String::new();
     out.push_str(&format!("@prefix rdf: <{RDF_NS}> .\n"));
@@ -367,6 +402,11 @@ struct SigFields {
 
 /// Parse a signature-graph (Turtle) into its [`SigFields`], reading the literals of the single
 /// `sig:Signature`. Any parse failure or missing required field is a clear `Err`; never panics.
+///
+/// **The subject IRI is never read** — only predicates and objects are. The node's name is an
+/// output of signing, not an input to verification, so a graph minted before the name carried
+/// its digest tag (`urn:sign:<hex>`) verifies exactly like one minted after it
+/// (`urn:sign:sha256:<hex>`); there is nothing to migrate and nothing joins the two forms.
 fn parse_sig_graph(turtle: &str) -> Result<SigFields, String> {
     let mut algorithm: Option<String> = None;
     let mut value_b64: Option<String> = None;
@@ -513,9 +553,10 @@ fn verify_ed25519(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Resul
     let signature = Signature::from_slice(&sig_bytes)
         .map_err(|e| format!("sig:value is not a 64-byte Ed25519 signature: {e}"))?;
     // `verify_strict`, not `verify`: a signature is this crate's content-address
-    // (`urn:sign:{sha256(signature)}`), so verification must admit exactly ONE valid signature
-    // per (message, key). The permissive `verify` accepts small-order (weak) keys — a hole that
-    // lets a forged signature validate almost any message, minting a bogus `urn:sign:` node.
+    // (`urn:sign:sha256:{sha256(signature)}`), so verification must admit exactly ONE
+    // valid signature per (message, key). The permissive `verify` accepts small-order (weak)
+    // keys — a hole that lets a forged signature validate almost any message, minting a bogus
+    // `urn:sign:` node.
     // `verify_strict` rejects small-order `A`/`R`; S-scalar canonicity is enforced by `from_slice`.
     Ok(match key.verify_strict(message, &signature) {
         Ok(()) => Verdict::Valid {
@@ -623,11 +664,13 @@ impl Endpoint for Sign {
                 "Sign bytes with a kernel-resolved PKCS8 private key, emitting a DETERMINISTIC \
                  RDF signature-graph (text/turtle): a sig:Signature with sig:algorithm, \
                  sig:signer (base64 pubkey), sig:value (base64 signature), and sig:contentHash \
-                 (the digest, TAGGED with its algorithm: sha256:<hex>). The algorithm follows the key — Ed25519 or ES256 (ECDSA P-256, \
-                 the Secure-Enclave/TPM algorithm). Pass the bytes as `in` (or pipe them as \
-                 `content`) and the private-key resource URI as `key=` (urn:/file: — resolved \
+                 (the digest, TAGGED with its algorithm: sha256:<hex>). The algorithm follows \
+                 the key — Ed25519 or ES256 (ECDSA P-256, the Secure-Enclave/TPM algorithm). \
+                 Pass the bytes as `in` (or pipe them as `content`) and the private-key \
+                 resource URI as `key=` (urn:/file: — resolved \
                  THROUGH the kernel, cap-scoped). No timestamp, so the graph is content-\
-                 addressable; the node IRI is skolemized (urn:sign:<hash>), no blank nodes. \
+                 addressable; the node IRI is skolemized and tagged with the digest that \
+                 addressed it (urn:sign:sha256:<hex>), no blank nodes. \
                  Requires the urn:cap:sign capability.",
             )
             .verb(Verb::Source)

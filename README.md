@@ -43,7 +43,7 @@ decided by the PKCS8 AlgorithmIdentifier, not by an argument you have to remembe
 
 ```turtle
 @prefix sig: <https://ikigai-rs.dev/ns/sign#> .
-<urn:sign:1fcc…> a sig:Signature ;
+<urn:sign:sha256:1fcc…> a sig:Signature ;
   sig:algorithm  "Ed25519" ;                # or "ES256"
   sig:signer     "<base64 public key>" ;
   sig:value      "<base64 signature>" ;
@@ -66,11 +66,22 @@ Verification accepts an **untagged** digest as SHA-256, so graphs signed before
 0.2.0 keep verifying; a tag this crate does not implement (`blake3:…`) is **refused**
 rather than assumed — otherwise the tag would be decoration.
 
+**So does the identifier.** The node is named `urn:sign:sha256:<hex>` — the same
+reasoning one level up, and it matters more there: a literal can be reinterpreted by
+a later producer, but a name is quoted, stored and pointed at, so an untagged digest
+inside an IRI is the more permanent commitment. Graphs minted before 0.2.1 carry the
+bare `urn:sign:<hex>` and **verify unchanged**: nothing reads the subject of a
+signature-graph, so this was a discontinuity in a naming scheme, not a migration.
+
 Because it's a graph it lives in the RDF fabric — composes with content-addressed
 code-graphs ([`ikigai-sexpr`](https://github.com/ikigai-rs/ikigai-sexpr)), the log,
 and verifiable credentials; it's SPARQL-able; and it's **deterministic** (no
 timestamp) so the signature-graph is itself content-addressable. The signature
-node's IRI is a hash of the signature value — skolemized, no blank nodes.
+node's IRI is a (tagged) hash **of the signature value** — skolemized, no blank
+nodes. Addressing it on the signature is deliberate: verification admits exactly one
+valid signature per (message, key), so exactly one node can be minted for a signed
+fact. A name derived from anything weaker would let a forgery mint a name for a fact
+nobody signed.
 
 ## Verify
 
