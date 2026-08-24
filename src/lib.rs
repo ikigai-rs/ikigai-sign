@@ -8,33 +8,41 @@
 //!
 //! 1. **`urn:sign:sign`** (Source, **requires `urn:cap:sign`**) — sign arbitrary bytes.
 //!    Inputs: `in` = the bytes to sign (piped `content` fallback) + `key` = the **URI** of a
-//!    PKCS8 Ed25519 **private** key resource. The key is dereferenced **through the kernel**
+//!    PKCS8 **private** key resource — Ed25519 **or** P-256; the algorithm is discovered from
+//!    the key, never stated by the caller. The key is dereferenced **through the kernel**
 //!    (`inv.source` on the URI, cap-scoped) — so `key=urn:file:my.pem` works today and
 //!    `key=urn:secret:…` works unchanged the moment a secrets backend exists. Output is a
 //!    **deterministic** RDF signature-graph (`text/turtle`): a `sig:Signature` with
 //!    `sig:algorithm`, `sig:signer` (base64 public key), `sig:value` (base64 signature), and
 //!    `sig:contentHash` (**`sha256:<hex>`** — the digest names its algorithm, see
-//!    [`HASH_ALG_SHA256`]). No timestamp — Ed25519 is deterministic, so the same
+//!    [`HASH_ALG_SHA256`]). No timestamp — both algorithms sign deterministically (Ed25519 by
+//!    construction, ES256 via RFC 6979), so the same
 //!    `(bytes, key)` yields byte-identical Turtle, and the graph is
 //!    content-addressable/cacheable. The signature node is **skolemized** to a stable,
 //!    content-addressed IRI (`urn:sign:<hex>`); no blank nodes.
 //!
 //! 2. **`urn:sign:verify`** (Source, **open** — no capability) — verify bytes against a
 //!    signature-graph. Inputs: `in` = the bytes, `sig` = the signature-graph (piped `content`
-//!    fallback), `key` = the URI of a SPKI Ed25519 **public** key resource (kernel-resolved).
+//!    fallback), `key` = the URI of a SPKI **public** key resource — Ed25519 or P-256, matching
+//!    the graph's `sig:algorithm` (kernel-resolved).
 //!    It parses the graph, recomputes the content hash of `in` and compares it to the graph's
 //!    `sig:contentHash` (an UNTAGGED digest is read as SHA-256, so records signed before the
 //!    tag existed still verify; an unrecognised tag is refused, never assumed), then
-//!    Ed25519-verifies the signature against the public key. Output is `text/plain`: a clear `valid` / `invalid`
+//!    **dispatches on the graph's `sig:algorithm`** and verifies with that algorithm against the
+//!    public key. Output is `text/plain`: a clear `valid` / `invalid`
 //!    verdict. A signature that simply does not check out is **not an error** — it is a `valid:
 //!    …` / `invalid: …` answer (`Ok`); only a malformed graph / unreadable key / missing field
 //!    is an `Err`. Never panics on hostile input.
 //!
 //! ## Keys
 //!
-//! Standard **PKCS8** (private) and **SPKI** (public) Ed25519 keys, in PEM or DER — exactly
-//! what `openssl genpkey -algorithm ed25519` emits, and what a `urn:secret:*` custody backend
-//! will serve. This module only **consumes** keys; **key generation is out of scope** (it
+//! Standard **PKCS8** (private) and **SPKI** (public) keys, in PEM or DER, of either supported
+//! algorithm — exactly what `openssl genpkey -algorithm ed25519` and `openssl ecparam -name
+//! prime256v1 -genkey` emit, and what a `urn:secret:*` custody backend will serve. The caller
+//! never names an algorithm: on the sign side it is discovered by which PKCS8 parser accepts
+//! the key (the AlgorithmIdentifier OID makes that unambiguous), and on the verify side it is
+//! read from the graph's `sig:algorithm`, with the supplied public key expected to match.
+//! This module only **consumes** keys; **key generation is out of scope** (it
 //! belongs to the secrets module, which owns the key lifecycle — HSM/passkey keys are
 //! generated non-exportably and would sign via a delegated act, not here).
 //!
@@ -85,11 +93,21 @@ pub const SIG_NS: &str = "https://ikigai-rs.dev/ns/sign#";
 
 /// `sig:Signature` — the class of the signature node.
 const SIG_SIGNATURE: &str = "https://ikigai-rs.dev/ns/sign#Signature";
-/// `sig:algorithm` — the signature algorithm name (always `Ed25519` in v1).
+/// `sig:algorithm` — the signature algorithm id: [`ALG_ED25519`] or [`ALG_ES256`], chosen by
+/// the key the signer was parsed from. **Not a constant.** It was `Ed25519` for every graph
+/// this module emitted before 0.2.0; since 0.2.0 `urn:sign:sign` dispatches on key type and
+/// verification dispatches on this literal, so a consumer branching on it has two arms to
+/// write and a third to refuse. (Refuse, do not assume: an unknown algorithm read as Ed25519
+/// would mint a confident verdict on a check that never happened — the same reasoning as
+/// [`content_hash_sha256_hex`]'s unknown-tag arm.)
 const SIG_ALGORITHM: &str = "https://ikigai-rs.dev/ns/sign#algorithm";
-/// `sig:signer` — the base64-encoded 32-byte Ed25519 public key of the signer.
+/// `sig:signer` — the base64-encoded public key of the signer, **in this algorithm's own
+/// encoding**: a raw 32-byte key for `Ed25519`, an SPKI DER document for `ES256`. The two are
+/// not interchangeable and the length does not identify them — read `sig:algorithm` first.
 const SIG_SIGNER: &str = "https://ikigai-rs.dev/ns/sign#signer";
-/// `sig:value` — the base64-encoded 64-byte Ed25519 signature.
+/// `sig:value` — the base64-encoded 64-byte signature: Ed25519's `R‖S`, or ES256's `r‖s`
+/// (fixed-width, not DER — the Enclave's DER output is normalised at the sign-through
+/// boundary). Same width for both algorithms, so the width proves nothing about which.
 const SIG_VALUE: &str = "https://ikigai-rs.dev/ns/sign#value";
 /// `sig:contentHash` — the **algorithm-tagged** digest of the signed bytes: `sha256:<hex>`.
 const SIG_CONTENT_HASH: &str = "https://ikigai-rs.dev/ns/sign#contentHash";
@@ -552,8 +570,10 @@ pub fn space() -> EndpointSpace {
         .bind(Exact::new("urn:sign:verify"), Verify)
 }
 
-/// `urn:sign:sign` — Ed25519-sign `in` bytes with the `key` private key, emitting the RDF
-/// signature-graph. Requires `urn:cap:sign` — kernel-enforced before dispatch, re-checked at
+/// `urn:sign:sign` — sign `in` bytes with the `key` private key, emitting the RDF
+/// signature-graph. The algorithm follows the key (Ed25519 or ES256) and is recorded in
+/// `sig:algorithm`; it is never a caller-supplied argument. Requires `urn:cap:sign` —
+/// kernel-enforced before dispatch, re-checked at
 /// entry (see [`CAP_SIGN`]).
 struct Sign;
 
