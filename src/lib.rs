@@ -34,7 +34,7 @@
 //!    verdict. A signature that simply does not check out is **not an error** — it is a `valid:
 //!    …` / `invalid: …` answer (`Ok`); only a malformed graph / unreadable key / missing field
 //!    is an `Err`. Never panics on hostile input. **The node's IRI is never read** — see
-//!    [`parse_sig_graph`] — so a graph minted under either spelling of the name verifies the
+//!    the private `parse_sig_graph` — so a graph minted under either spelling of the name verifies the
 //!    same way, and the tagging of the identifier in 0.2.1 was a discontinuity in a naming
 //!    scheme, not a migration.
 //!
@@ -133,7 +133,7 @@ const SIG_CONTENT_HASH: &str = "https://ikigai-rs.dev/ns/sign#contentHash";
 ///
 /// An IDENTIFIER made of an untagged digest is the same commitment, only harder to walk back:
 /// a literal can be rewritten by a later producer, but a name is quoted, stored and referred
-/// to elsewhere. So the node IRI carries the tag as well — see [`sign_to_graph`].
+/// to elsewhere. So the node IRI carries the tag as well — see the private `sign_to_graph`.
 ///
 /// Public so a second producer of `sig:contentHash` writes the tag from THIS definition rather
 /// than from a copy of the string.
