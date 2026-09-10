@@ -834,3 +834,48 @@ fn an_old_form_bare_hex_node_still_verifies() {
         "a pre-0.2.1 bare-hex node must still verify, got: {verdict}"
     );
 }
+
+// ---- the wire shapes of sig:signer and sig:value, per algorithm ---------------------------
+
+/// The two literals a consumer DECODES, pinned per algorithm. Their doc comments drifted once
+/// (2026-08-23: "32-byte Ed25519 public key" / "64-byte Ed25519 signature") because the tests
+/// asserted round-trip validity and never the field shape. The shapes: `sig:signer` is in the
+/// ALGORITHM'S encoding — 32 raw bytes for Ed25519, a 91-byte SPKI DER document for ES256 —
+/// and `sig:value` is 64 bytes for both. Neither length identifies the algorithm; read
+/// `sig:algorithm` first (README, "The signature is a graph"). A change here is a wire-format
+/// change for every consumer, `ikigai-log`'s seals included.
+#[test]
+fn signer_and_value_shapes_are_pinned_per_algorithm() {
+    let k = kernel();
+    let decode = |b64: &str| B64.decode(b64.as_bytes()).expect("valid base64");
+
+    let ed = parse_sig_graph(&sign(&k, b"shape", "urn:test:k1-priv")).unwrap();
+    let ed_signer = decode(ed.signer_b64.as_deref().unwrap());
+    assert_eq!(
+        ed_signer.len(),
+        32,
+        "Ed25519 sig:signer is the raw public key"
+    );
+    assert_eq!(decode(&ed.value_b64).len(), 64, "Ed25519 sig:value is R‖S");
+    assert!(
+        parse_ed25519_public(&ed_signer).is_err(),
+        "the raw key is NOT an SPKI document — the two encodings are not interchangeable"
+    );
+
+    let es = parse_sig_graph(&sign(&k, b"shape", "urn:test:p256-priv")).unwrap();
+    let es_signer = decode(es.signer_b64.as_deref().unwrap());
+    // SPKI DER: a SEQUENCE (0x30) of 89 bytes — the AlgorithmIdentifier plus the 65-byte
+    // uncompressed point — 91 bytes in all, and it re-parses as the public key.
+    assert_eq!(
+        es_signer.len(),
+        91,
+        "ES256 sig:signer is an SPKI DER document"
+    );
+    assert_eq!(&es_signer[..2], &[0x30, 0x59]);
+    assert!(parse_p256_public(&es_signer).is_ok());
+    assert_eq!(
+        decode(&es.value_b64).len(),
+        64,
+        "ES256 sig:value is fixed-width r‖s, not DER"
+    );
+}

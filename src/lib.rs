@@ -50,12 +50,27 @@
 //! belongs to the secrets module, which owns the key lifecycle — HSM/passkey keys are
 //! generated non-exportably and would sign via a delegated act, not here).
 //!
+//! ## Cacheability
+//!
+//! Both results are marked `.cacheable()` — signing is deterministic, verification is a pure
+//! function of graph + bytes + key — and neither declares a golden thread of its own. The key
+//! is the only state either reads, it is read THROUGH the kernel, and the kernel folds the key
+//! resolution's expiry and threads into the result: **a signature is exactly as cacheable as
+//! its key.** A keystore that serves keys under a thread (an `ikigai-fs` cacheable mount, a
+//! store that cuts on rotation) gets signatures that cache until the key rotates; one that
+//! serves keys uncacheable (a secret backend read on every call) gets signatures that
+//! recompute every call. This module holds no key material and watches nothing, so the
+//! thread is the keystore's to name and to cut — `tests/conformance.rs` pins both halves, and
+//! runs `ikigai-conformance` over [`space`] under both keystore kinds and both algorithms.
+//!
 //! ## The `sig:` vocabulary
 //!
 //! Self-contained in this crate under `https://ikigai-rs.dev/ns/sign#` (see [`SIG_NS`]), and
 //! deliberately **not** part of the shared `ikigai-rs.dev/ns` vocabulary — so no `/ns` deploy
 //! is owed. The `sig:Signature` / `sig:algorithm` / `sig:signer` / `sig:value` /
-//! `sig:contentHash` terms are the ones to promote if it graduates.
+//! `sig:contentHash` terms are the ones to promote if it graduates. `ikigai-conformance`'s
+//! VOCABULARY check knows the namespace as this crate's own (`Suite::namespace`); it is
+//! defined by this documentation and the README, not served as a vocabulary document.
 //!
 //! **A second producer exists** as of 2026-08-23: `ikigai-log`'s `#seal` lines carry
 //! `sig:contentHash` / `sig:value` rather than minting parallel terms. That is exactly why the
@@ -676,6 +691,10 @@ impl Endpoint for Sign {
             .verb(Verb::Source)
             .verb(Verb::Meta)
             .requires(CAP_SIGN)
+            // `xsd:string` is the WIRE's type, not the value's: `in` is opaque bytes (a PDF
+            // is valid input) and no XSD datatype is true of them, but a piped value and an
+            // MCP argument both arrive as a string, and that is what an agent forming the
+            // call needs to know.
             .input(
                 ArgSpec::new("in")
                     .summary("the bytes to sign (positional/named, or piped as `content`)")
@@ -690,8 +709,9 @@ impl Endpoint for Sign {
             .input(
                 ArgSpec::new("key")
                     .summary(
-                        "URI of the PKCS8 Ed25519 PRIVATE key resource (PEM or DER), resolved \
-                         through the kernel — e.g. urn:file:my.pem or a future urn:secret:…",
+                        "URI of the PKCS8 PRIVATE key resource (PEM or DER) — Ed25519 or P-256 \
+                         (ES256), discovered from the key — resolved through the kernel, e.g. \
+                         urn:file:my.pem or urn:secret:…",
                     )
                     .class(RDFS_RESOURCE),
             )
@@ -770,8 +790,8 @@ impl Endpoint for Verify {
             .input(
                 ArgSpec::new("key")
                     .summary(
-                        "URI of the SPKI Ed25519 PUBLIC key resource (PEM or DER), resolved \
-                         through the kernel",
+                        "URI of the SPKI PUBLIC key resource (PEM or DER) of the graph's \
+                         sig:algorithm — Ed25519 or P-256 (ES256) — resolved through the kernel",
                     )
                     .class(RDFS_RESOURCE),
             )

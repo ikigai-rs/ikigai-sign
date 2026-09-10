@@ -98,6 +98,26 @@ Tampering with the content, the signature value, or presenting the wrong key all
 return a clear `invalid`; a malformed graph or unreadable key is a clean error,
 never a panic.
 
+## Cacheability
+
+A signature is exactly as cacheable as the key it was made with. Both endpoints
+mark their results cacheable and declare no golden thread of their own: the key is
+the only state they read, it is read through the kernel, and the kernel folds the
+key resolution's expiry and threads into the result. Serve keys under a thread (an
+`ikigai-fs` cacheable mount, a keystore that cuts on rotation) and signatures cache
+until the key rotates; serve them uncacheable (a secret backend read on every call)
+and every signature recomputes. The signer holds no key material and watches
+nothing — the thread is the keystore's to name and to cut.
+
+## Conformance
+
+Passes [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance)
+(`tests/conformance.rs`): every check, no opt-outs, over both keystore kinds and
+both algorithms. The `sig:` terms live under `https://ikigai-rs.dev/ns/sign#` —
+this crate's own namespace (`ikigai_sign::SIG_NS`), registered with the suite as
+such. It is defined here and in the crate docs, not yet served as a vocabulary
+document.
+
 ## Portable code, made safe
 
 Combined with `ikigai-sexpr`, this closes the trust half of Code-on-Demand:
