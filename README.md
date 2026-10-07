@@ -159,7 +159,7 @@ let space = ikigai_sign::space(); // binds urn:sign:sign + urn:sign:verify
 
 Both endpoints (and the crypto) are wasm-clean.
 
-## Unreleased — 0.2.3 (a patch)
+## 0.2.3 (2026-10-07, a patch)
 
 Fixes for audit round 3 (ledger #857), each pinned by `tests/audit_857.rs`:
 
