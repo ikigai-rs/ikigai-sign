@@ -8,15 +8,17 @@
 //!
 //! 1. **`urn:sign:sign`** (Source, **requires `urn:cap:sign`**) — sign arbitrary bytes.
 //!    Inputs: `in` = the bytes to sign (piped `content` fallback) + `key` = the **URI** of a
-//!    PKCS8 **private** key resource — Ed25519 **or** P-256; the algorithm is discovered from
+//!    PKCS8 (or, for P-256, SEC1) **private** key resource — Ed25519 **or** P-256; the
+//!    algorithm is discovered from
 //!    the key, never stated by the caller. The key is dereferenced **through the kernel**
 //!    (`inv.source` on the URI, cap-scoped) — so `key=urn:file:my.pem` works today and
-//!    `key=urn:secret:…` works unchanged the moment a secrets backend exists. Output is a
+//!    `key=urn:secret:…` works unchanged the moment a secrets backend exists. Only `urn:` and
+//!    `file:` key IRIs are accepted (a typed `InvalidArgument` otherwise). Output is a
 //!    **deterministic** RDF signature-graph (`text/turtle`): a `sig:Signature` with
 //!    `sig:algorithm`, `sig:signer` (base64 public key), `sig:value` (base64 signature), and
 //!    `sig:contentHash` (**`sha256:<hex>`** — the digest names its algorithm, see
 //!    [`HASH_ALG_SHA256`]). No timestamp — both algorithms sign deterministically (Ed25519 by
-//!    construction, ES256 via RFC 6979), so the same
+//!    construction, ES256 via RFC 6979, emitted in its low-S form), so the same
 //!    `(bytes, key)` yields byte-identical Turtle, and the graph is
 //!    content-addressable/cacheable. The signature node is **skolemized** to a stable IRI
 //!    content-addressed on the signature and **tagged with the digest algorithm that
@@ -26,13 +28,15 @@
 //!    signature-graph. Inputs: `in` = the bytes, `sig` = the signature-graph (piped `content`
 //!    fallback), `key` = the URI of a SPKI **public** key resource — Ed25519 or P-256, matching
 //!    the graph's `sig:algorithm` (kernel-resolved).
-//!    It parses the graph, recomputes the content hash of `in` and compares it to the graph's
+//!    It parses the graph — exactly one `sig:Signature` node, its fields read from that node
+//!    only — recomputes the content hash of `in` and compares it to the graph's
 //!    `sig:contentHash` (an UNTAGGED digest is read as SHA-256, so records signed before the
 //!    tag existed still verify; an unrecognised tag is refused, never assumed), then
 //!    **dispatches on the graph's `sig:algorithm`** and verifies with that algorithm against the
-//!    public key. Output is `text/plain`: a clear `valid` / `invalid`
+//!    public key — strictly: Ed25519 via `verify_strict`, ES256 low-S only, so exactly one
+//!    signature per (message, key) is ever `valid`. Output is `text/plain`: a clear `valid` / `invalid`
 //!    verdict. A signature that simply does not check out is **not an error** — it is a `valid:
-//!    …` / `invalid: …` answer (`Ok`); only a malformed graph / unreadable key / missing field
+//!    …` / `invalid: …` answer (`Ok`); only a malformed or ambiguous graph / unreadable key / missing field
 //!    is an `Err`. Never panics on hostile input. **The node's IRI is never read** — see
 //!    the private `parse_sig_graph` — so a graph minted under either spelling of the name verifies the
 //!    same way, and the tagging of the identifier in 0.2.1 was a discontinuity in a naming
@@ -41,8 +45,11 @@
 //! ## Keys
 //!
 //! Standard **PKCS8** (private) and **SPKI** (public) keys, in PEM or DER, of either supported
-//! algorithm — exactly what `openssl genpkey -algorithm ed25519` and `openssl ecparam -name
-//! prime256v1 -genkey` emit, and what a `urn:secret:*` custody backend will serve. The caller
+//! algorithm — exactly what `openssl genpkey -algorithm ed25519` and `openssl genpkey
+//! -algorithm EC -pkeyopt ec_paramgen_curve:P-256` emit, and what a `urn:secret:*` custody
+//! backend will serve. A P-256 private key is also accepted in **SEC1** (`EC PRIVATE KEY`, PEM
+//! or DER, with or without a leading `EC PARAMETERS` block), which is what `openssl ecparam
+//! -name prime256v1 -genkey` writes; its curve is checked, not assumed. The caller
 //! never names an algorithm: on the sign side it is discovered by which PKCS8 parser accepts
 //! the key (the AlgorithmIdentifier OID makes that unambiguous), and on the verify side it is
 //! read from the graph's `sig:algorithm`, with the supplied public key expected to match.
@@ -98,6 +105,7 @@ use p256::ecdsa::{
 };
 use p256::pkcs8::EncodePublicKey;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The capability gating "may sign at all." Declared on `urn:sign:sign` via
 /// [`Description::requires`], and so enforced by the kernel *before dispatch* (core 0.1.49
@@ -125,8 +133,10 @@ const SIG_ALGORITHM: &str = "https://ikigai-rs.dev/ns/sign#algorithm";
 /// not interchangeable and the length does not identify them — read `sig:algorithm` first.
 const SIG_SIGNER: &str = "https://ikigai-rs.dev/ns/sign#signer";
 /// `sig:value` — the base64-encoded 64-byte signature: Ed25519's `R‖S`, or ES256's `r‖s`
-/// (fixed-width, not DER — the Enclave's DER output is normalised at the sign-through
-/// boundary). Same width for both algorithms, so the width proves nothing about which.
+/// (fixed-width, not DER — the Enclave's DER output is converted at the sign-through
+/// boundary), with ES256's `s` always in the LOW half of the group order: `urn:sign:sign` emits
+/// low-S and `urn:sign:verify` refuses high-S (since 0.2.3). Same width for both algorithms,
+/// so the width proves nothing about which.
 const SIG_VALUE: &str = "https://ikigai-rs.dev/ns/sign#value";
 /// `sig:contentHash` — the **algorithm-tagged** digest of the signed bytes: `sha256:<hex>`.
 const SIG_CONTENT_HASH: &str = "https://ikigai-rs.dev/ns/sign#contentHash";
@@ -235,6 +245,11 @@ enum AnySigner {
 impl AnySigner {
     /// Parse a PKCS8 private key, trying each supported algorithm. The PKCS8 AlgorithmIdentifier
     /// OID makes this unambiguous — only the matching parser accepts the key.
+    ///
+    /// A P-256 key is ALSO accepted in SEC1 (`-----BEGIN EC PRIVATE KEY-----`, or its DER), with
+    /// or without the `EC PARAMETERS` block in front — exactly what `openssl ecparam -name
+    /// prime256v1 -genkey` writes, which this crate's documentation has long named as a usable
+    /// recipe (it was not, until ledger #857). See [`parse_p256_sec1`].
     fn parse(bytes: &[u8]) -> Result<AnySigner, String> {
         let ed = match as_pem(bytes) {
             Some(pem) => SigningKey::from_pkcs8_pem(pem),
@@ -247,12 +262,25 @@ impl AnySigner {
             Some(pem) => P256SigningKey::from_pkcs8_pem(pem),
             None => P256SigningKey::from_pkcs8_der(bytes),
         };
-        match ec {
-            Ok(k) => Ok(AnySigner::Es256(Box::new(k))),
-            Err(e) => Err(format!(
-                "not a PKCS8 Ed25519 or P-256 (ES256) private key (P-256 parse: {e})"
-            )),
+        let pkcs8_err = match ec {
+            Ok(k) => return Ok(AnySigner::Es256(Box::new(k))),
+            Err(e) => e,
+        };
+        // SEC1, but only for input that IS SEC1-shaped — so a SEC1 key that fails says why
+        // (wrong curve, malformed), and anything else keeps the PKCS8 message it always had.
+        let sec1_shaped = match as_pem(bytes) {
+            Some(pem) => pem.contains("-----BEGIN EC "),
+            None => sec1::EcPrivateKey::try_from(bytes).is_ok(),
+        };
+        if sec1_shaped {
+            return parse_p256_sec1(bytes)
+                .map(|k| AnySigner::Es256(Box::new(k)))
+                .map_err(|e| format!("not a usable SEC1 P-256 (ES256) private key: {e}"));
         }
+        Err(format!(
+            "not a PKCS8 Ed25519, PKCS8 P-256 or SEC1 P-256 (ES256) private key \
+             (P-256 PKCS8 parse: {pkcs8_err})"
+        ))
     }
 
     /// The `sig:algorithm` id for this key.
@@ -278,6 +306,12 @@ impl AnySigner {
             }
             AnySigner::Es256(k) => {
                 let sig: P256Signature = k.sign(message);
+                // Emit LOW-S. RFC 6979 fixes the nonce, not which of the two valid `s` values
+                // comes out, and p256 does not normalize — so about half of raw signatures
+                // are high-S, and `verify_es256` refuses those (one valid signature per
+                // (message, key), or the content-addressed node name is forgeable). Still
+                // deterministic: normalization is a pure function of the signature.
+                let sig = sig.normalize_s().unwrap_or(sig);
                 let spki = k
                     .verifying_key()
                     .to_public_key_der()
@@ -314,6 +348,105 @@ fn parse_p256_public(bytes: &[u8]) -> Result<P256VerifyingKey, String> {
     }
 }
 
+/// The named-curve OID for NIST P-256 (`prime256v1` / `secp256r1`).
+const P256_OID: sec1::der::asn1::ObjectIdentifier =
+    sec1::der::asn1::ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+
+/// Parse a SEC1 P-256 private key — PEM (`EC PRIVATE KEY`, optionally preceded by `EC
+/// PARAMETERS`, as `openssl ecparam -genkey` writes it) or DER.
+///
+/// **The curve is checked, because p256's own SEC1 loader does not**: it reads the 32-byte
+/// scalar and validates the embedded public key if there is one, but never reads the key's
+/// curve parameter (an upstream TODO). A 32-byte secp256k1 scalar with no public half would
+/// otherwise load as a P-256 key and sign under a curve its owner never chose. So: the
+/// `EC PARAMETERS` block, if present, must name P-256; the key's own `[0]` parameter, if
+/// present, must name P-256; and a key with NEITHER that parameter NOR a public half (which
+/// p256 checks against the scalar) names no curve at all and is refused.
+fn parse_p256_sec1(bytes: &[u8]) -> Result<P256SigningKey, String> {
+    use sec1::der::Decode;
+
+    let der = match as_pem(bytes) {
+        Some(pem) => {
+            let mut key: Option<Vec<u8>> = None;
+            for (label, der) in pem_blocks(pem)? {
+                match label.as_str() {
+                    "EC PARAMETERS" => {
+                        let params = sec1::EcParameters::from_der(&der)
+                            .map_err(|e| format!("unreadable `EC PARAMETERS` block: {e}"))?;
+                        match params.named_curve() {
+                            Some(oid) if oid == P256_OID => {}
+                            Some(oid) => {
+                                return Err(format!(
+                                    "the `EC PARAMETERS` block names curve {oid}, which is not \
+                                     P-256 (prime256v1, {P256_OID})"
+                                ))
+                            }
+                            None => return Err("the `EC PARAMETERS` block names no curve".into()),
+                        }
+                    }
+                    "EC PRIVATE KEY" if key.is_none() => key = Some(der),
+                    "EC PRIVATE KEY" => return Err("more than one `EC PRIVATE KEY` block".into()),
+                    other => {
+                        return Err(format!(
+                            "unexpected PEM block `{other}` beside a SEC1 key (expected only \
+                             `EC PARAMETERS` and one `EC PRIVATE KEY`)"
+                        ))
+                    }
+                }
+            }
+            key.ok_or("no `EC PRIVATE KEY` block")?
+        }
+        None => bytes.to_vec(),
+    };
+
+    let ec = sec1::EcPrivateKey::try_from(der.as_slice())
+        .map_err(|e| format!("not a SEC1 ECPrivateKey: {e}"))?;
+    match ec.parameters.and_then(|p| p.named_curve()) {
+        Some(oid) if oid == P256_OID => {}
+        Some(oid) => {
+            return Err(format!(
+                "the key names curve {oid}, which is not P-256 (prime256v1, {P256_OID})"
+            ))
+        }
+        None if ec.public_key.is_none() => {
+            return Err(
+                "the key names no curve and carries no public key, so nothing says it is P-256"
+                    .into(),
+            )
+        }
+        None => {}
+    }
+    let secret = p256::SecretKey::try_from(ec)
+        .map_err(|e| format!("not a valid P-256 key (scalar or public half rejected): {e}"))?;
+    Ok(P256SigningKey::from(secret))
+}
+
+/// Split PEM text into its `(label, DER)` blocks, in order. Strict: anything outside the
+/// armor other than whitespace is refused, so a block cannot hide behind prose.
+fn pem_blocks(pem: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut blocks = Vec::new();
+    let mut rest = pem;
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return Ok(blocks);
+        }
+        let header = trimmed
+            .strip_prefix("-----BEGIN ")
+            .ok_or("text outside a PEM block")?;
+        let label = &header[..header.find("-----").ok_or("unterminated PEM header")?];
+        let end_line = format!("-----END {label}-----");
+        let end = trimmed
+            .find(&end_line)
+            .ok_or_else(|| format!("no `{end_line}` line"))?
+            + end_line.len();
+        let (_, der) = sec1::der::pem::decode_vec(&trimmed.as_bytes()[..end])
+            .map_err(|e| format!("malformed `{label}` PEM block: {e}"))?;
+        blocks.push((label.to_string(), der));
+        rest = &trimmed[end..];
+    }
+}
+
 /// View `bytes` as a PEM string iff they are UTF-8 beginning (after leading whitespace) with a
 /// `-----BEGIN` armor line; otherwise `None` (treat as DER). Keeps the PEM/DER split total.
 fn as_pem(bytes: &[u8]) -> Option<&str> {
@@ -336,9 +469,10 @@ fn sign_to_graph(message: &[u8], signer: &AnySigner) -> Result<String, String> {
 
     // Skolemize: the node IRI is content-addressed on the (deterministic) signature bytes, so
     // the graph is stable and diffable and carries no blank node. WHAT it is derived from —
-    // sha256 over the BASE64 TEXT of the signature — is load-bearing (see `verify_ed25519`:
-    // verification must admit exactly one valid signature per (message, key), or this name is
-    // forgeable), and the tag does not touch it: 0.2.1 added an algorithm label to the name,
+    // sha256 over the BASE64 TEXT of the signature — is load-bearing (see `verify_ed25519` and
+    // `verify_es256`: verification must admit exactly one valid signature per (message, key),
+    // or this name is forgeable — ES256 only since 0.2.3, ledger #857), and the tag does not
+    // touch it: 0.2.1 added an algorithm label to the name,
     // it did not re-derive the name. A name is a harder commitment than a literal — a literal
     // can be rewritten by a later producer, a name is quoted and pointed at — so the digest
     // that addresses the node says which digest it is, exactly as `sig:contentHash` does.
@@ -415,58 +549,126 @@ struct SigFields {
     signer_b64: Option<String>,
 }
 
-/// Parse a signature-graph (Turtle) into its [`SigFields`], reading the literals of the single
-/// `sig:Signature`. Any parse failure or missing required field is a clear `Err`; never panics.
+/// The four `sig:` field predicates, with the short names errors use.
+const SIG_FIELDS: [(&str, &str); 4] = [
+    (SIG_ALGORITHM, "sig:algorithm"),
+    (SIG_VALUE, "sig:value"),
+    (SIG_CONTENT_HASH, "sig:contentHash"),
+    (SIG_SIGNER, "sig:signer"),
+];
+
+/// What one subject of a signature-graph says, as far as verification cares.
+#[derive(Default)]
+struct SigNode {
+    /// `rdf:type sig:Signature`.
+    typed: bool,
+    /// Field short name (`sig:value`, …) → its distinct literal values. A SET, because RDF is
+    /// one: the same triple written twice is one triple, not a conflict.
+    fields: BTreeMap<&'static str, BTreeSet<String>>,
+}
+
+/// Parse a signature-graph (Turtle) into its [`SigFields`]: the literals of its ONE
+/// `sig:Signature` node, and only that node's. Any parse failure, missing required field or
+/// ambiguity is a clear `Err`; never panics.
 ///
-/// **The subject IRI is never read** — only predicates and objects are. The node's name is an
-/// output of signing, not an input to verification, so a graph minted before the name carried
-/// its digest tag (`urn:sign:<hex>`) verifies exactly like one minted after it
-/// (`urn:sign:sha256:<hex>`); there is nothing to migrate and nothing joins the two forms.
+/// Read **per subject** (ledger #857). Until 0.2.3 the fields were collected predicate by
+/// predicate across every subject, so a graph holding two signatures — two parties' graphs
+/// concatenated, or `urn:rdf:union`ed — gave a verdict that depended on triple order, and the
+/// fields need not have belonged to the signature node at all. Now each of these is refused,
+/// by name: no `sig:Signature` node, more than one, a `sig:` field on any OTHER subject, a
+/// field with two different values, a field whose object is not a literal. Triples that use
+/// no `sig:` field predicate are left alone — a signature-graph may sit beside a description
+/// of what it signs. These are SHAPE refusals (`Err`), like a missing field always was: there
+/// is no single signature to give a verdict on.
+///
+/// **The subject IRI is still never read** — which subject is the signature is decided by its
+/// `rdf:type`, never by its name. The node's name is an output of signing, not an input to
+/// verification, so a graph minted before the name carried its digest tag (`urn:sign:<hex>`)
+/// verifies exactly like one minted after it (`urn:sign:sha256:<hex>`), and so does a node
+/// named anything else; there is nothing to migrate and nothing joins the forms.
 fn parse_sig_graph(turtle: &str) -> Result<SigFields, String> {
-    let mut algorithm: Option<String> = None;
-    let mut value_b64: Option<String> = None;
-    let mut content_hash: Option<String> = None;
-    let mut signer_b64: Option<String> = None;
-    let mut saw_signature = false;
+    // Keyed by the subject's N-Triples form, ordered so every message is deterministic.
+    let mut nodes: BTreeMap<String, SigNode> = BTreeMap::new();
 
     for quad in RdfParser::from_format(RdfFormat::Turtle).for_slice(turtle.as_bytes()) {
         let quad = quad.map_err(|e| format!("signature-graph parse error: {e}"))?;
         let predicate = quad.predicate.as_str();
-        match predicate {
-            RDF_TYPE => {
-                if let Term::NamedNode(n) = &quad.object {
-                    if n.as_str() == SIG_SIGNATURE {
-                        saw_signature = true;
-                    }
-                }
+        if predicate == RDF_TYPE {
+            if matches!(&quad.object, Term::NamedNode(n) if n.as_str() == SIG_SIGNATURE) {
+                nodes.entry(quad.subject.to_string()).or_default().typed = true;
             }
-            SIG_ALGORITHM => algorithm = literal_value(&quad.object).or(algorithm),
-            SIG_VALUE => value_b64 = literal_value(&quad.object).or(value_b64),
-            SIG_CONTENT_HASH => content_hash = literal_value(&quad.object).or(content_hash),
-            SIG_SIGNER => signer_b64 = literal_value(&quad.object).or(signer_b64),
-            _ => {}
+            continue;
         }
+        let Some(&(_, name)) = SIG_FIELDS.iter().find(|(iri, _)| *iri == predicate) else {
+            continue;
+        };
+        let Term::Literal(literal) = &quad.object else {
+            return Err(format!(
+                "{name} on {} is not a literal ({})",
+                quad.subject, quad.object
+            ));
+        };
+        nodes
+            .entry(quad.subject.to_string())
+            .or_default()
+            .fields
+            .entry(name)
+            .or_default()
+            .insert(literal.value().to_string());
     }
 
-    if !saw_signature {
+    let typed: Vec<&String> = nodes
+        .iter()
+        .filter(|(_, n)| n.typed)
+        .map(|(s, _)| s)
+        .collect();
+    let subject = match typed.as_slice() {
+        [] => {
+            return Err(format!(
+                "no `sig:Signature` (`<{SIG_SIGNATURE}>`) node in the signature-graph"
+            ))
+        }
+        [one] => (*one).clone(),
+        many => {
+            return Err(format!(
+                "the signature-graph holds {} `sig:Signature` nodes ({}); verification reads \
+                 exactly one, so verify each signature against a graph of its own",
+                many.len(),
+                many.iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    };
+    if let Some((stray, node)) = nodes
+        .iter()
+        .find(|(s, n)| **s != subject && !n.fields.is_empty())
+    {
         return Err(format!(
-            "no `sig:Signature` (`<{SIG_SIGNATURE}>`) node in the signature-graph"
+            "{} on {stray}, which is not the graph's `sig:Signature` node ({subject}); a \
+             signature-graph's `sig:` fields all describe its one signature",
+            node.fields.keys().copied().collect::<Vec<_>>().join(", ")
         ));
     }
-    Ok(SigFields {
-        algorithm: algorithm.ok_or("signature-graph missing sig:algorithm")?,
-        value_b64: value_b64.ok_or("signature-graph missing sig:value")?,
-        content_hash: content_hash.ok_or("signature-graph missing sig:contentHash")?,
-        signer_b64,
-    })
-}
 
-/// The lexical value of a literal object, or `None` for a non-literal term.
-fn literal_value(term: &Term) -> Option<String> {
-    match term {
-        Term::Literal(l) => Some(l.value().to_string()),
-        _ => None,
-    }
+    let mut node = nodes.remove(&subject).unwrap_or_default();
+    let mut take = |name: &str| -> Result<Option<String>, String> {
+        let values = node.fields.remove(name).unwrap_or_default();
+        if values.len() > 1 {
+            return Err(format!(
+                "the `sig:Signature` node {subject} carries {} different {name} values",
+                values.len()
+            ));
+        }
+        Ok(values.into_iter().next())
+    };
+    Ok(SigFields {
+        algorithm: take("sig:algorithm")?.ok_or("signature-graph missing sig:algorithm")?,
+        value_b64: take("sig:value")?.ok_or("signature-graph missing sig:value")?,
+        content_hash: take("sig:contentHash")?.ok_or("signature-graph missing sig:contentHash")?,
+        signer_b64: take("sig:signer")?,
+    })
 }
 
 /// The outcome of a verification: a clear valid/invalid verdict with a reason.
@@ -595,6 +797,21 @@ fn verify_es256(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Result<
         .map_err(|e| format!("sig:value is not valid base64: {e}"))?;
     let signature = P256Signature::from_slice(&sig_bytes)
         .map_err(|e| format!("sig:value is not a 64-byte P-256 (ES256) signature: {e}"))?;
+    // LOW-S only — ES256's `verify_strict`. ECDSA is malleable: if `(r, s)` verifies, so does
+    // `(r, n − s)`, and anyone can compute that twin from a published graph WITHOUT the key.
+    // A signature is this crate's content-address, so admitting both would let a stranger mint
+    // a second `urn:sign:` node for a fact signed once (ledger #857; both auditors reproduced
+    // it). `urn:sign:sign` emits low-S, so this refuses only signatures this module would
+    // never have produced. A verdict, not an error: the graph is well-formed, it just does not
+    // carry the one signature this module accepts.
+    if signature.normalize_s().is_some() {
+        return Ok(Verdict::Invalid {
+            reason: "high-S ES256 signature: s is in the upper half of the group order, the \
+                     non-canonical twin of a low-S signature; this module admits exactly one \
+                     valid signature per (message, key) and accepts only the low-S form"
+                .to_string(),
+        });
+    }
     Ok(match key.verify(message, &signature) {
         Ok(()) => Verdict::Valid {
             algorithm: ALG_ES256.to_string(),
@@ -709,8 +926,9 @@ impl Endpoint for Sign {
             .input(
                 ArgSpec::new("key")
                     .summary(
-                        "URI of the PKCS8 PRIVATE key resource (PEM or DER) — Ed25519 or P-256 \
-                         (ES256), discovered from the key — resolved through the kernel, e.g. \
+                        "URI (urn: or file: only) of the PRIVATE key resource — PKCS8 Ed25519 \
+                         or P-256 (ES256), or SEC1 P-256; PEM or DER; the algorithm is \
+                         discovered from the key — resolved through the kernel, e.g. \
                          urn:file:my.pem or urn:secret:…",
                     )
                     .class(RDFS_RESOURCE),
@@ -760,14 +978,18 @@ impl Endpoint for Verify {
                 "Verify bytes against an RDF signature-graph with a kernel-resolved SPKI public \
                  key. Pass the bytes as `in`, the signature-graph as `sig` (or pipe it as \
                  `content`), and the public-key resource URI as `key=` (resolved through the \
-                 kernel). It parses the graph, recomputes the content hash and compares it to \
+                 kernel). It parses the graph (exactly one sig:Signature node, its fields read \
+                 from that node only), recomputes the content hash and compares it to \
                  the graph's sig:contentHash (sha256:<hex>; an untagged hex digest is read as \
                  SHA-256 for pre-0.2 graphs, any other tag is refused), and — \
                  dispatching on the graph's sig:algorithm — Ed25519- or ES256-verifies the \
-                 signature against the public key (parsed as that algorithm). Output is \
+                 signature against the public key (parsed as that algorithm), strictly: one \
+                 valid signature per (message, key), so a high-S ES256 signature is invalid. \
+                 Output is \
                  text/plain — `valid: signed by …` or `invalid: <reason>`. A signature that \
                  doesn't check out is a normal `invalid` answer, not an error; only a malformed \
-                 graph/key is an error. Open — no capability required.",
+                 or ambiguous graph, or an unusable key, is an error. Open — no capability \
+                 required.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)
@@ -790,8 +1012,9 @@ impl Endpoint for Verify {
             .input(
                 ArgSpec::new("key")
                     .summary(
-                        "URI of the SPKI PUBLIC key resource (PEM or DER) of the graph's \
-                         sig:algorithm — Ed25519 or P-256 (ES256) — resolved through the kernel",
+                        "URI (urn: or file: only) of the SPKI PUBLIC key resource (PEM or DER) \
+                         of the graph's sig:algorithm — Ed25519 or P-256 (ES256) — resolved \
+                         through the kernel",
                     )
                     .class(RDFS_RESOURCE),
             )
@@ -843,10 +1066,16 @@ fn read_str<'a>(
     )))
 }
 
+/// The URI schemes a `key=` IRI may use. Keys are local resources — a file, a keystore, a
+/// secret backend — never a network fetch.
+const KEY_SCHEMES: [&str; 2] = ["urn", "file"];
+
 /// Resolve the `key` argument — a resource **URI** — THROUGH the kernel, recording it as a
 /// dependency (so a cached result invalidates when the key changes). The value arrives inline
 /// as an IRI string (the engine passes `key=urn:…` inline); http(s) is not a key transport, so
-/// only `urn:`/`file:` resolvable IRIs are accepted. Errors if detached (no kernel context).
+/// only `urn:`/`file:` IRIs are accepted ([`KEY_SCHEMES`]) and anything else is a typed
+/// `InvalidArgument` on `key` — enforced since 0.2.3; the promise was documented, and not
+/// checked, from 0.1.0 (ledger #857). Errors if detached (no kernel context).
 async fn resolve_key(inv: &Invocation<'_>, iri: &str) -> CoreResult<Representation> {
     let key_uri = inv.inline_str("key").map_err(|_| {
         CoreError::Endpoint(format!(
@@ -855,6 +1084,19 @@ async fn resolve_key(inv: &Invocation<'_>, iri: &str) -> CoreResult<Representati
     })?;
     let key_iri = Iri::parse(key_uri)
         .map_err(|e| CoreError::Endpoint(format!("{iri}: bad key IRI `{key_uri}`: {e}")))?;
+    // An allowlist, checked BEFORE anything is resolved: a host that binds an http(s) endpoint
+    // would otherwise fetch a private key (on `sign`) or a public key (on the OPEN `verify`)
+    // over the network on the caller's say-so. Schemes compare case-insensitively (RFC 3986).
+    let scheme = key_uri.split_once(':').map_or("", |(scheme, _)| scheme);
+    if !KEY_SCHEMES.iter().any(|s| s.eq_ignore_ascii_case(scheme)) {
+        return Err(CoreError::InvalidArgument {
+            name: "key".to_string(),
+            detail: format!(
+                "{iri}: key IRI `{key_uri}` uses the `{scheme}:` scheme; a key resolves only \
+                 from `urn:` or `file:` (http(s) is not a key transport)"
+            ),
+        });
+    }
     inv.issue(Request::new(Verb::Source, key_iri)).await
 }
 

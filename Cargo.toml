@@ -31,6 +31,12 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["std", 
 # ⇒ wasm-clean. The module dispatches on `sig:algorithm`, so adding this did not touch Ed25519.
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "pem"] }
 
+# SEC1 (`-----BEGIN EC PRIVATE KEY-----`), the form `openssl ecparam -genkey` writes. Already in
+# the graph under p256 (same 0.7 line, so `p256::SecretKey: TryFrom<sec1::EcPrivateKey>` lines
+# up); named directly because p256 re-exports neither `EcPrivateKey` nor `EcParameters`, and
+# reading the key's curve parameter is the check p256's own SEC1 loader skips. Pure Rust.
+sec1 = { version = "0.7.3", default-features = false, features = ["der", "pem"] }
+
 # SHA-256 for `sig:contentHash` (RustCrypto, pure Rust, wasm-clean).
 sha2 = "0.10"
 
