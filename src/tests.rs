@@ -731,8 +731,9 @@ fn node_iri(graph: &str) -> &str {
 /// ★ The property the tag must NOT disturb: the node is content-addressed ON THE SIGNATURE.
 /// `sha256(base64 sig:value)` is what names it — before the tag and after — because that is
 /// what makes the name unforgeable: verification admits exactly one valid signature per
-/// (message, key) (`verify_strict`; see
-/// [`weak_key_forgery_is_rejected_though_permissive_verify_accepts`]), so exactly one node IRI
+/// (message, key) (`verify_strict` for Ed25519, see
+/// [`weak_key_forgery_is_rejected_though_permissive_verify_accepts`]; low-S only for ES256, see
+/// `tests/audit_857.rs`), so exactly one node IRI
 /// can be minted for a signed fact. Address it on anything weaker — the message, the signer —
 /// and a forgery mints a name that says a thing that was never signed.
 ///

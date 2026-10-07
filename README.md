@@ -34,10 +34,19 @@ sign key=urn:secret:signing-key   # a Keychain/HSM-backed secret tomorrow (no ch
 
 The signer holds no key material of its own — key custody (and generation) belong
 to [`ikigai-secret`](https://github.com/ikigai-rs/ikigai-secret). Keys are standard
-**PKCS8** (private) / **SPKI** (public), PEM or DER (auto-detected), so both
-`openssl genpkey -algorithm ed25519` and `openssl ecparam -name prime256v1 -genkey`
-produce usable keys with no bespoke tooling — and which one you handed over is
-decided by the PKCS8 AlgorithmIdentifier, not by an argument you have to remember.
+**PKCS8** (private) / **SPKI** (public), PEM or DER (auto-detected), so
+`openssl genpkey -algorithm ed25519` and
+`openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256` produce usable keys
+with no bespoke tooling — and which one you handed over is decided by the PKCS8
+AlgorithmIdentifier, not by an argument you have to remember. A P-256 private key
+is also accepted in **SEC1** (`-----BEGIN EC PRIVATE KEY-----`, PEM or DER), with or
+without the `EC PARAMETERS` block in front of it, because that is what the familiar
+`openssl ecparam -name prime256v1 -genkey` writes. Its curve is checked rather than
+assumed: a SEC1 key or parameters block naming any other curve is refused.
+
+Only `urn:` and `file:` key IRIs are accepted. A key is a local resource, never a
+network fetch, so `key=https://…` is refused as an invalid argument before anything
+is resolved.
 
 ## The signature is a graph
 
@@ -53,7 +62,8 @@ decided by the PKCS8 AlgorithmIdentifier, not by an argument you have to remembe
 **Read `sig:algorithm` before reading the other two.** `sig:signer` is in that
 algorithm's own encoding — a raw 32-byte key for Ed25519, an SPKI DER document for
 ES256 — and `sig:value` is 64 bytes for both (`R‖S` and fixed-width `r‖s`
-respectively, never DER), so neither length tells you which you have.
+respectively, never DER), so neither length tells you which you have. An ES256
+`s` is always the **low-S** half (see Verify).
 
 **The digest names its algorithm.** `sig:contentHash` is `sha256:<hex>`, not bare
 hex: a signature-graph is meant to be checkable by a stranger years from now, and a
@@ -98,6 +108,23 @@ Tampering with the content, the signature value, or presenting the wrong key all
 return a clear `invalid`; a malformed graph or unreadable key is a clean error,
 never a panic.
 
+**Exactly one valid signature per (message, key), for both algorithms.** The node
+is named after its signature, so a second valid signature would be a second name
+for the same signed fact. Ed25519 verifies with `verify_strict`. ECDSA is malleable:
+if `(r, s)` verifies, so does `(r, n − s)`, and anyone can compute that twin without
+the key. So ES256 accepts only the **low-S** form, and `sign` always emits it:
+
+```text
+invalid: high-S ES256 signature: s is in the upper half of the group order, …
+```
+
+**A signature-graph holds one signature.** Verification finds the node typed
+`sig:Signature` and reads its fields from that node only. It refuses a graph with
+two such nodes (two parties' graphs concatenated or unioned: verify each against its
+own graph), a `sig:` field on any other subject, and a field with two different
+values. Other triples, such as a title for the signed document, are left alone. The
+node's *name* is still never read, so a graph verifies whatever its node is called.
+
 ## Cacheability
 
 A signature is exactly as cacheable as the key it was made with. Both endpoints
@@ -131,6 +158,32 @@ let space = ikigai_sign::space(); // binds urn:sign:sign + urn:sign:verify
 ```
 
 Both endpoints (and the crypto) are wasm-clean.
+
+## Unreleased — 0.2.3 (a patch)
+
+Fixes for audit round 3 (ledger #857), each pinned by `tests/audit_857.rs`:
+
+- **ES256 is no longer malleable.** `verify` refuses a high-S signature, the
+  key-less `(r, n − s)` twin of a valid one, which minted a second
+  content-addressed node for the same (message, key). `sign` emits low-S. For about
+  half of all (message, key) pairs this changes the ES256 bytes `sign` produces, and
+  so the node's name. It is still deterministic.
+- **One signature per graph.** The graph is read per subject: exactly one
+  `sig:Signature` node, fields from that node only. Before, the fields were read from
+  any subject, and a graph holding two signatures gave a verdict that depended on
+  triple order.
+- **SEC1 P-256 keys load**, the `openssl ecparam -genkey` output the docs have
+  always named, with the curve checked.
+- **`key=` takes `urn:` and `file:` only**, as documented since 0.1.0 and never
+  checked until now. Anything else is a typed `InvalidArgument` on `key`.
+
+**Why a patch and not 0.3.0.** No API changes. The verdicts that change are for
+inputs this crate's own documentation already called invalid: one signature per
+(message, key), "the single `sig:Signature`", and only `urn:`/`file:` keys. A
+search of every persisted store we hold found **no ES256 signature-graph**, so
+nothing already signed stops verifying. Three consumers pin `0.2`. A 0.3.0 would cap
+each of them below this security fix until someone edits its manifest; a patch
+reaches them on their next resolve.
 
 ## License
 
