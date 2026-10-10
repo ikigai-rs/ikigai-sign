@@ -94,8 +94,8 @@ use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 // The `signature` crate's traits, implemented by BOTH algorithms' keys — imported once and
 // used for Ed25519 and ES256 alike (this is the crypto-agility, at the trait level).
 use ikigai_core::{
-    ArgSpec, Description, Endpoint, EndpointSpace, Error as CoreError, Exact, Invocation, Iri,
-    ReprType, Representation, Request, Result as CoreResult, Verb,
+    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error as CoreError, Exact,
+    Invocation, Iri, ReprType, Representation, Request, Result as CoreResult, Verb,
 };
 use oxrdf::Term;
 use oxrdfio::{RdfFormat, RdfParser};
@@ -835,12 +835,19 @@ fn p256_signer_b64(key: &P256VerifyingKey) -> Result<String, String> {
 // The endpoints — the only kernel-aware layer.
 // =====================================================================================
 
+/// The name [`space`] claims: `urn:iki:space:sign`.
+pub const SPACE_ID: &str = "urn:iki:space:sign";
+
 /// Mount the module at its conventional IRIs: `urn:sign:sign` (cap-gated) and
 /// `urn:sign:verify` (open). A host links this crate and mounts the returned space.
+///
+/// Configuration-free (two stateless doors, nothing read while building), so the space
+/// names itself [`SPACE_ID`]. The name goes on LAST: binding another door drops it.
 pub fn space() -> EndpointSpace {
     EndpointSpace::new()
         .bind(Exact::new("urn:sign:sign"), Sign)
         .bind(Exact::new("urn:sign:verify"), Verify)
+        .named(space_iri("sign"))
 }
 
 /// `urn:sign:sign` — sign `in` bytes with the `key` private key, emitting the RDF

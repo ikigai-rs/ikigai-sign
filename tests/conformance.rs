@@ -47,6 +47,13 @@
 //! that namespace and nothing else. What the check cannot see: the namespace is
 //! defined by this crate's documentation, not served as a vocabulary document.
 //!
+//! ## The space's name
+//!
+//! [`ikigai_sign::space`] is configuration-free (two stateless doors), so it names
+//! itself [`ikigai_sign::SPACE_ID`], and SPACE-NAME holds it to that. The kernel the
+//! walk runs on binds the keystore onto that space, which drops the name (core
+//! 0.1.89): the claim is about the constructor, not the extended space.
+//!
 //! No opt-outs, and NAMES runs: both ids are kebab-case.
 
 use async_trait::async_trait;
@@ -61,11 +68,18 @@ use std::sync::{Arc, RwLock};
 const SIGN: &str = "sign";
 const VERIFY: &str = "verify";
 
-/// Where the fixture binds the keypair. Each doubles as the golden thread the
-/// threaded keystore names for it — the `ikigai-fs` convention (`depends_on` the
-/// resource's own IRI), so a cut is keyed on the name the caller resolved.
+/// Where the fixture binds the keypair.
 const PRIVATE_IRI: &str = "urn:conformance:key:private";
 const PUBLIC_IRI: &str = "urn:conformance:key:public";
+
+/// The golden thread the threaded keystore names for each key and cuts on rotation.
+/// Deliberately NOT the key's own IRI: the kernel already hangs every cacheable read
+/// on the name it was read through, so a thread equal to that name is
+/// indistinguishable from no thread at all, and conformance 0.6 reports it (CACHEABLE:
+/// "no golden thread but its own name"). A keystore with a rotation names the
+/// rotation.
+const PRIVATE_THREAD: &str = "urn:conformance:keystore:rotation:private";
+const PUBLIC_THREAD: &str = "urn:conformance:keystore:rotation:public";
 
 /// The bytes every fired action signs or verifies.
 const MESSAGE: &str = "conformance";
@@ -151,14 +165,14 @@ impl Endpoint for Key {
 /// every key live.
 fn keystore(keys: &Keypair, threaded: bool) -> (Kernel, Arc<RwLock<&'static str>>) {
     let private = Arc::new(RwLock::new(keys.private));
-    let thread = |iri: &'static str| threaded.then_some(iri);
+    let thread = |name: &'static str| threaded.then_some(name);
     let space = ikigai_sign::space()
         .bind(
             Exact::new(PRIVATE_IRI),
             Key {
                 id: "key-private",
                 pem: Arc::clone(&private),
-                thread: thread(PRIVATE_IRI),
+                thread: thread(PRIVATE_THREAD),
             },
         )
         .bind(
@@ -166,7 +180,7 @@ fn keystore(keys: &Keypair, threaded: bool) -> (Kernel, Arc<RwLock<&'static str>
             Key {
                 id: "key-public",
                 pem: Arc::new(RwLock::new(keys.public)),
-                thread: thread(PUBLIC_IRI),
+                thread: thread(PUBLIC_THREAD),
             },
         );
     (Kernel::new(Arc::new(space)), private)
@@ -202,10 +216,13 @@ fn sign(kernel: &Kernel, message: &str) -> String {
 }
 
 /// The suite, configured for this module (see the file docs for why each line):
-/// the module's namespace, and one fixture per action.
+/// the module's namespace, its self-named space, and one fixture per action.
 fn suite(graph: &str) -> Suite {
     Suite::new()
         .namespace(ikigai_sign::SIG_NS)
+        // `space()` is configuration-free, so it claims `urn:iki:space:sign`. The
+        // walked kernel is anonymous: the keystore binds onto it, which drops the name.
+        .self_named_space("sign", ikigai_sign::space)
         .fixture(
             Fixture::new(SIGN, Verb::Source)
                 .arg("in", MESSAGE)
@@ -254,6 +271,10 @@ fn conforms() {
         assert!(report.is_clean(), "{}: {report}", keys.algorithm);
         assert_shape(&report);
     }
+    assert_eq!(
+        ikigai_core::space_iri("sign").as_str(),
+        ikigai_sign::SPACE_ID
+    );
 }
 
 /// The other keystore: keys served uncacheable, as a secret backend that must hit
@@ -299,7 +320,7 @@ fn over_a_live_keystore_nothing_is_cached() {
 /// The half the suite cannot see: the thread a signature inherits is a name the
 /// KEYSTORE cuts. This module has no watcher and no key material, so after a
 /// rotation with no cut the cached signature — made with the old key — is served;
-/// the keystore cutting the thread it declared (the key's own IRI) is what
+/// the keystore cutting the thread it declared (its rotation thread) is what
 /// recomputes it. The rotation swaps algorithms so the recomputation is visible in
 /// the bytes: a deterministic re-sign under the SAME key would be byte-identical
 /// to the stale one, and prove nothing.
@@ -322,9 +343,9 @@ fn a_rotated_key_is_cut_and_the_signature_recomputes() {
         "no watcher here: a rotation with no cut is served from the cache"
     );
 
-    // The keystore cuts the thread it named — the key's IRI — and the signature
+    // The keystore cuts the thread it named — the key's rotation — and the signature
     // that depended on it goes with it.
-    kernel.cut(PRIVATE_IRI);
+    kernel.cut(PRIVATE_THREAD);
     let fresh = sign(&kernel, MESSAGE);
     assert!(
         fresh.contains("sig:algorithm \"ES256\""),
