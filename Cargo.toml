@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sign"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Capability-gated Ed25519 / ES256 signing + verification module for ikigai: `urn:sign:sign` (requires `urn:cap:sign`) turns bytes + a kernel-resolved PKCS8 private key into a deterministic RDF signature-graph (a `sig:Signature` in Turtle; the algorithm follows the key); `urn:sign:verify` (open) parses that graph, recomputes the hash, and verifies against a kernel-resolved SPKI public key, dispatching on the graph's `sig:algorithm`. Keys are standard PKCS8/SPKI (PEM or DER) resolved through the kernel — no keygen here."
