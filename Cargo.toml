@@ -12,9 +12,10 @@ categories = ["cryptography", "web-programming"]
 
 [dependencies]
 # The published kernel, consumed from crates.io — the SAME version the hosts use, so a host
-# links exactly one `ikigai-core`. 0.1.46 carries `.transreptor()` + ArgSpec
-# `class`/`one_of`/`default_value` and `Error::Denied`, the whole surface these endpoints use.
-ikigai-core = "0.1.46"
+# links exactly one `ikigai-core`. 0.1.89 is the floor for `space_iri` and for `bind` dropping
+# a space's name (so `space()` can self-name `urn:iki:space:sign`); a `^0.1.89` caret admits
+# every later 0.1.x, which is the whole kernel line today.
+ikigai-core = "0.1.89"
 async-trait = "0.1"
 
 # Ed25519 (RFC 8032, deterministic signatures) over standard PKCS8/SPKI keys. `pkcs8`+`pem`
@@ -61,5 +62,6 @@ getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }
 [dev-dependencies]
 futures = "0.3" # block_on for the async endpoint tests
 # The module recipe as one test (`tests/conformance.rs`): walks every bound
-# endpoint and reports every violation at once. 0.1.0 is the first release.
-ikigai-conformance = "0.2.0"
+# endpoint and reports every violation at once. 0.6.0 adds SPACE-NAME (a self-named space
+# claims `urn:iki:space:<module>`). A 0.x caret is a CEILING too: `"0.6.0"` means `<0.7.0`.
+ikigai-conformance = "0.6.0"

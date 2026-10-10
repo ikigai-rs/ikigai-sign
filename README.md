@@ -157,6 +157,8 @@ verify on receipt → run it capability-clamped.**
 let space = ikigai_sign::space(); // binds urn:sign:sign + urn:sign:verify
 ```
 
+The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is configuration-free.
+
 Both endpoints (and the crypto) are wasm-clean.
 
 ## 0.2.3 (2026-10-07, a patch)
