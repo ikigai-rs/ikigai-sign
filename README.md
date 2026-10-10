@@ -161,6 +161,20 @@ The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is con
 
 Both endpoints (and the crypto) are wasm-clean.
 
+## 0.3.0 (2026-10-09)
+
+- **The space has a name.** `space()` is configuration-free, so it names itself
+  `urn:iki:space:sign`, exported as `ikigai_sign::SPACE_ID` (ledger #987). The name
+  is a cache claim: any space named that holds the same two doors. Binding another
+  door onto it drops the name (core 0.1.89), so a host that extends the space names
+  the result itself.
+- Pins: `ikigai-core` 0.1.89, `ikigai-conformance` 0.6.0 (dev).
+
+**Why a minor.** No API was removed, but naming changes what every host sees:
+`answered-by`, `urn:kernel:topology`, the space diagrams and cache partitioning all
+now carry `urn:iki:space:sign` where they showed an anonymous node. A host takes
+that on deliberately, by moving its pin from `0.2` to `0.3`.
+
 ## 0.2.3 (2026-10-07, a patch)
 
 Fixes for audit round 3 (ledger #857), each pinned by `tests/audit_857.rs`:
