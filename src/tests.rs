@@ -880,3 +880,146 @@ fn signer_and_value_shapes_are_pinned_per_algorithm() {
         "ES256 sig:value is fixed-width r‖s, not DER"
     );
 }
+
+// ---- mutation-testing survivors (ledger #1444): behaviors the crate promises, now pinned ----
+
+/// The P-256 key from `tests/audit_857.rs`, as SEC1 PEM and its DER (scalar 0x07×32, with
+/// `[0]` curve parameter and `[1]` public half).
+const SEC1_PEM: &str = "-----BEGIN EC PRIVATE KEY-----\n\
+MHcCAQEEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHoAoGCCqGSM49\n\
+AwEHoUQDQgAEHhhTL9R1TALzBB2cdc6zO4P/2BrHzk/ogsyxyYvFiW6kbDEcTi/0\n\
+DdlqNlPm5FRF0y3+SG7O11x6kMahiIHAow==\n\
+-----END EC PRIVATE KEY-----\n";
+const SEC1_DER_B64: &str = "MHcCAQEEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHoAoGCCqGSM49AwEHoUQDQgAEHhhTL9R1TALzBB2cdc6zO4P/2BrHzk/ogsyxyYvFiW6kbDEcTi/0DdlqNlPm5FRF0y3+SG7O11x6kMahiIHAow==";
+
+fn sec1_der() -> Vec<u8> {
+    B64.decode(SEC1_DER_B64).unwrap()
+}
+
+/// The same key with its `[0]` curve parameter removed (12 bytes at offset 39).
+fn sec1_der_without_params() -> Vec<u8> {
+    let mut der = sec1_der();
+    assert_eq!(&der[39..41], &[0xa0, 0x0a]);
+    der.drain(39..51);
+    der[1] -= 12;
+    der
+}
+
+#[test]
+fn two_sec1_private_key_blocks_are_refused() {
+    let twice = format!("{SEC1_PEM}{SEC1_PEM}");
+    let r = parse_p256_sec1(twice.as_bytes());
+    assert!(
+        matches!(&r, Err(m) if m.contains("more than one")),
+        "two EC PRIVATE KEY blocks must be refused, got {:?}",
+        r.map(|_| ())
+    );
+    assert!(parse_p256_sec1(SEC1_PEM.as_bytes()).is_ok());
+}
+
+#[test]
+fn a_sec1_key_without_a_curve_parameter_loads_only_with_its_public_half() {
+    // Public half present: p256 checks it against the scalar, so the curve is vouched for.
+    let with_pub = sec1_der_without_params();
+    assert!(
+        parse_p256_sec1(&with_pub).is_ok(),
+        "public half names the curve"
+    );
+
+    // Neither parameter nor public half: nothing says it is P-256.
+    let mut bare = vec![0x30, 0x25, 0x02, 0x01, 0x01, 0x04, 0x20];
+    bare.extend_from_slice(&[0x07; 32]);
+    let r = parse_p256_sec1(&bare);
+    assert!(
+        matches!(&r, Err(m) if m.contains("names no curve")),
+        "got {:?}",
+        r.map(|_| ())
+    );
+}
+
+#[test]
+fn turtle_string_escapes_every_reserved_character() {
+    assert_eq!(turtle_string("a\\b"), r#""a\\b""#);
+    assert_eq!(turtle_string("a\"b"), r#""a\"b""#);
+    assert_eq!(turtle_string("a\nb"), r#""a\nb""#);
+    assert_eq!(turtle_string("a\rb"), r#""a\rb""#);
+    assert_eq!(turtle_string("a\tb"), r#""a\tb""#);
+    assert_eq!(turtle_string("plain"), r#""plain""#);
+}
+
+#[test]
+fn turtle_string_output_round_trips_through_a_turtle_parser() {
+    let nasty = "q\"uote \\ back\nline\rcr\ttab\" . <x> <y> \"z";
+    let ttl = format!(
+        "@prefix sig: <{SIG_NS}> .\n<urn:x:s> sig:signer {} .\n",
+        turtle_string(nasty)
+    );
+    let quads: Vec<_> = RdfParser::from_format(RdfFormat::Turtle)
+        .for_slice(ttl.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("escaped literal parses");
+    assert_eq!(quads.len(), 1, "no injected triples");
+    let Term::Literal(l) = &quads[0].object else {
+        panic!("object is a literal")
+    };
+    assert_eq!(l.value(), nasty);
+}
+
+fn fields_with_signer(signer: Option<&str>) -> SigFields {
+    SigFields {
+        algorithm: ALG_ED25519.to_string(),
+        value_b64: String::new(),
+        content_hash: String::new(),
+        signer_b64: signer.map(str::to_string),
+    }
+}
+
+#[test]
+fn signer_mismatch_reports_a_different_embedded_signer() {
+    let v = signer_mismatch(&fields_with_signer(Some("AAAA")), "BBBB");
+    assert!(
+        matches!(&v, Some(Verdict::Invalid { reason })
+            if reason.contains("not the graph's signer")
+                && reason.contains("AAAA") && reason.contains("BBBB")),
+        "got {:?}",
+        v.map(|v| v.render())
+    );
+    assert!(signer_mismatch(&fields_with_signer(Some("AAAA")), "AAAA").is_none());
+    assert!(signer_mismatch(&fields_with_signer(None), "AAAA").is_none());
+}
+
+#[test]
+fn verifying_with_a_key_other_than_the_graphs_signer_says_so() {
+    let k = kernel();
+    let msg = b"signed by k1";
+    // Ed25519: the graph names k1; the caller supplies k2.
+    let graph = sign(&k, msg, "urn:test:k1-priv");
+    let verdict = verify(&k, msg, &graph, "urn:test:k2-pub");
+    assert!(
+        verdict.starts_with("invalid:") && verdict.contains("not the graph's signer"),
+        "got: {verdict}"
+    );
+    // ES256: the graph names the P-256 key; the caller supplies a different P-256 key
+    // (the Ed25519 one cannot parse as P-256, so build the other key from a second scalar).
+    let other = P256SigningKey::from_slice(&[0x09; 32]).unwrap();
+    let other_pub = other
+        .verifying_key()
+        .to_public_key_der()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let es_graph = sign(&k, msg, "urn:test:p256-priv");
+    let fields = parse_sig_graph(&es_graph).unwrap();
+    let r = verify_message(msg, &fields, &other_pub).unwrap();
+    assert!(
+        matches!(&r, Verdict::Invalid { reason } if reason.contains("not the graph's signer")),
+        "got {}",
+        r.render()
+    );
+}
+
+#[test]
+fn endpoints_carry_their_diagnostic_names() {
+    assert_eq!(Sign.name(), "sign");
+    assert_eq!(Verify.name(), "verify");
+}
