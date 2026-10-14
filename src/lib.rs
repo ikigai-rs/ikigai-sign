@@ -1071,8 +1071,10 @@ async fn resolve_key(inv: &Invocation<'_>, iri: &str) -> CoreResult<Representati
     // Core's typed refusal, unchanged: `MissingArgument` when `key` is absent, `InvalidArgument`
     // when it is not an inline UTF-8 value.
     let key_uri = inv.inline_str("key")?;
-    let key_iri = Iri::parse(key_uri)
-        .map_err(|e| CoreError::Endpoint(format!("{iri}: bad key IRI `{key_uri}`: {e}")))?;
+    let key_iri = Iri::parse(key_uri).map_err(|e| CoreError::InvalidArgument {
+        name: "key".to_string(),
+        detail: format!("{iri}: bad key IRI `{key_uri}`: {e}"),
+    })?;
     // An allowlist, checked BEFORE anything is resolved: a host that binds an http(s) endpoint
     // would otherwise fetch a private key (on `sign`) or a public key (on the OPEN `verify`)
     // over the network on the caller's say-so. Schemes compare case-insensitively (RFC 3986).
