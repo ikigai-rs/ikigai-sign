@@ -161,6 +161,17 @@ The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is con
 
 Both endpoints (and the crypto) are wasm-clean.
 
+## Unreleased
+
+- **A missing input is a typed refusal.** `sign` and `verify` refuse a call that
+  leaves out `in`, `key` or `sig` (with no piped `content` standing in) with core's
+  `MissingArgument` naming the declared input, and one whose input is given but is
+  not an inline value (or not UTF-8, where text is needed) with `InvalidArgument`
+  naming it. Before, both were an untyped endpoint error, so a caller could not tell
+  its own omission from a failure of the module. A given-but-unusable `in` or `sig`
+  is no longer skipped in favor of `content`.
+- `ikigai-conformance` 0.8.0 (dev), whose REQUIRED check found the above.
+
 ## 0.3.0 (2026-10-09)
 
 - **The space has a name.** `space()` is configuration-free, so it names itself

@@ -42,6 +42,10 @@
 //!    same way, and the tagging of the identifier in 0.2.1 was a discontinuity in a naming
 //!    scheme, not a migration.
 //!
+//! On both endpoints a required input left out is core's typed `MissingArgument` naming it
+//! (`in`, `sig`, `key`; a piped `content` stands in for `in` on `sign` and for `sig` on
+//! `verify`), and one given but not an inline value is `InvalidArgument` naming it.
+//!
 //! ## Keys
 //!
 //! Standard **PKCS8** (private) and **SPKI** (public) keys, in PEM or DER, of either supported
@@ -870,17 +874,12 @@ impl Endpoint for Sign {
             )));
         }
 
-        let message = read_bytes(
-            inv,
-            &["in", "content"],
-            "urn:sign:sign",
-            "bytes to sign (`in`)",
-        )?;
+        let message = read_bytes(inv, &["in", "content"])?;
         let key_repr = resolve_key(inv, "urn:sign:sign").await?;
         let signer = AnySigner::parse(&key_repr.bytes)
             .map_err(|e| CoreError::Endpoint(format!("urn:sign:sign: {e}")))?;
 
-        let graph = sign_to_graph(&message, &signer)
+        let graph = sign_to_graph(message, &signer)
             .map_err(|e| CoreError::Endpoint(format!("urn:sign:sign: {e}")))?;
         Ok(Representation::new(
             ReprType::new(MEDIA_TURTLE).with_param("charset", "utf-8"),
@@ -951,18 +950,13 @@ struct Verify;
 #[async_trait]
 impl Endpoint for Verify {
     async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
-        let message = read_bytes(inv, &["in"], "urn:sign:verify", "bytes to verify (`in`)")?;
-        let sig_turtle = read_str(
-            inv,
-            &["sig", "content"],
-            "urn:sign:verify",
-            "signature-graph (`sig`, or piped `content`)",
-        )?;
+        let message = read_bytes(inv, &["in"])?;
+        let sig_turtle = read_str(inv, &["sig", "content"])?;
         let fields = parse_sig_graph(sig_turtle)
             .map_err(|e| CoreError::Endpoint(format!("urn:sign:verify: {e}")))?;
 
         let key_repr = resolve_key(inv, "urn:sign:verify").await?;
-        let verdict = verify_message(&message, &fields, &key_repr.bytes)
+        let verdict = verify_message(message, &fields, &key_repr.bytes)
             .map_err(|e| CoreError::Endpoint(format!("urn:sign:verify: {e}")))?;
 
         Ok(Representation::new(
@@ -1033,44 +1027,34 @@ impl Endpoint for Verify {
 // Kernel-aware input helpers.
 // =====================================================================================
 
-/// Read the first present inline argument among `names` as raw bytes. `iri`/`what` frame the
-/// "no input" error.
-fn read_bytes(inv: &Invocation<'_>, names: &[&str], iri: &str, what: &str) -> CoreResult<Vec<u8>> {
-    for name in names {
-        if let Ok(bytes) = inv.inline_arg(name) {
-            return Ok(bytes.to_vec());
-        }
-    }
-    Err(CoreError::Endpoint(format!(
-        "{iri} needs the {what} — pass {} or pipe it in",
-        names
-            .iter()
-            .map(|n| format!("`{n}=`"))
-            .collect::<Vec<_>>()
-            .join(" / ")
-    )))
+/// Read the first present inline argument among `names` as raw bytes. `names[0]` is the
+/// declared required input; the rest are its alternatives (the piped `content`).
+///
+/// Every refusal is core's TYPED one, so a caller can tell its own omission from a failure of
+/// this module: none of `names` given is `MissingArgument` naming `names[0]` (the input the
+/// contract declares required), and a name that IS given but is not an inline value is
+/// `InvalidArgument` naming it. A present-but-unusable argument is never skipped in favor of
+/// an alternative: that would answer a malformed call with "missing".
+fn read_bytes<'a>(inv: &'a Invocation<'_>, names: &[&str]) -> CoreResult<&'a [u8]> {
+    first_present(names, |name| inv.inline_arg(name))
 }
 
-/// Read the first present inline argument among `names` as a UTF-8 string.
-fn read_str<'a>(
-    inv: &'a Invocation<'_>,
-    names: &[&str],
-    iri: &str,
-    what: &str,
-) -> CoreResult<&'a str> {
+/// Read the first present inline argument among `names` as a UTF-8 string, with the same typed
+/// refusals as [`read_bytes`] (plus `InvalidArgument` for a value that is not UTF-8).
+fn read_str<'a>(inv: &'a Invocation<'_>, names: &[&str]) -> CoreResult<&'a str> {
+    first_present(names, |name| inv.inline_str(name))
+}
+
+/// The first of `names` that `read` finds, skipping only a `MissingArgument`; when every name
+/// is missing, the refusal names `names[0]`.
+fn first_present<T>(names: &[&str], read: impl Fn(&str) -> CoreResult<T>) -> CoreResult<T> {
     for name in names {
-        if let Ok(s) = inv.inline_str(name) {
-            return Ok(s);
+        match read(name) {
+            Err(CoreError::MissingArgument(_)) => continue,
+            other => return other,
         }
     }
-    Err(CoreError::Endpoint(format!(
-        "{iri} needs the {what} — pass {} or pipe it in",
-        names
-            .iter()
-            .map(|n| format!("`{n}=`"))
-            .collect::<Vec<_>>()
-            .join(" / ")
-    )))
+    Err(CoreError::MissingArgument(names[0].to_string()))
 }
 
 /// The URI schemes a `key=` IRI may use. Keys are local resources — a file, a keystore, a
@@ -1084,11 +1068,9 @@ const KEY_SCHEMES: [&str; 2] = ["urn", "file"];
 /// `InvalidArgument` on `key` — enforced since 0.2.3; the promise was documented, and not
 /// checked, from 0.1.0 (ledger #857). Errors if detached (no kernel context).
 async fn resolve_key(inv: &Invocation<'_>, iri: &str) -> CoreResult<Representation> {
-    let key_uri = inv.inline_str("key").map_err(|_| {
-        CoreError::Endpoint(format!(
-            "{iri} needs `key=<uri>` — the URI of the key resource, resolved through the kernel"
-        ))
-    })?;
+    // Core's typed refusal, unchanged: `MissingArgument` when `key` is absent, `InvalidArgument`
+    // when it is not an inline UTF-8 value.
+    let key_uri = inv.inline_str("key")?;
     let key_iri = Iri::parse(key_uri)
         .map_err(|e| CoreError::Endpoint(format!("{iri}: bad key IRI `{key_uri}`: {e}")))?;
     // An allowlist, checked BEFORE anything is resolved: a host that binds an http(s) endpoint
