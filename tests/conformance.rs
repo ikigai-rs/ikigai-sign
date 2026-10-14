@@ -54,7 +54,10 @@
 //! walk runs on binds the keystore onto that space, which drops the name (core
 //! 0.1.89): the claim is about the constructor, not the extended space.
 //!
-//! No opt-outs, and NAMES runs: both ids are kebab-case.
+//! No opt-outs, and NAMES runs: both ids are kebab-case. REQUIRED (0.8.0) runs too: each
+//! required input (`in`, `key`, and `sig` on verify) dropped from a fixture call is refused
+//! with a typed `MissingArgument`; under 0.6 these were untyped endpoint errors, and the
+//! unit test `a_missing_required_input_is_a_typed_missing_argument` pins the fix.
 
 use async_trait::async_trait;
 use ikigai_conformance::{Check, Fixture, Report, Suite};

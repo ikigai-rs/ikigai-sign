@@ -400,6 +400,102 @@ fn sign_reads_bytes_from_piped_content() {
     assert!(verdict.starts_with("valid:"), "got: {verdict}");
 }
 
+// ---- a missing or unusable input is a TYPED refusal naming it -----------------------------
+
+/// A request to `iri` carrying exactly `args`, each inline.
+fn request_with(iri: &str, args: &[(&str, &[u8])]) -> Request {
+    args.iter().fold(
+        Request::new(Verb::Source, Iri::parse(iri).unwrap()),
+        |req, (name, value)| req.with_arg(*name, ArgRef::Inline(value.to_vec())),
+    )
+}
+
+/// Each required input left out is refused as a typed `MissingArgument` naming it, never an
+/// untyped endpoint error: the caller's omission, not this module's failure
+/// (ikigai-conformance 0.8.0's REQUIRED check). Where a piped `content` is the alternative, the
+/// refusal names the DECLARED input (`in`, `sig`), the one the contract marks required.
+#[test]
+fn a_missing_required_input_is_a_typed_missing_argument() {
+    let k = kernel();
+    let graph = sign(&k, b"x", "urn:test:k1-priv");
+    let (msg, priv_key, pub_key) = (&b"x"[..], &b"urn:test:k1-priv"[..], &b"urn:test:k1-pub"[..]);
+    // (endpoint, the arguments given, the required one left out)
+    type Case<'a> = (&'a str, Vec<(&'a str, &'a [u8])>, &'a str);
+    let cases: [Case; 5] = [
+        ("urn:sign:sign", vec![("key", priv_key)], "in"),
+        ("urn:sign:sign", vec![("in", msg)], "key"),
+        (
+            "urn:sign:verify",
+            vec![("sig", graph.as_bytes()), ("key", pub_key)],
+            "in",
+        ),
+        (
+            "urn:sign:verify",
+            vec![("in", msg), ("key", pub_key)],
+            "sig",
+        ),
+        (
+            "urn:sign:verify",
+            vec![("in", msg), ("sig", graph.as_bytes())],
+            "key",
+        ),
+    ];
+    let cap = Capability::scoped([CAP_SIGN]);
+    for (iri, args, missing) in cases {
+        match block_on(k.issue(request_with(iri, &args), &cap)) {
+            Err(CoreError::MissingArgument(name)) => assert_eq!(name, missing, "{iri}"),
+            other => panic!("{iri} without `{missing}`: expected MissingArgument, got {other:?}"),
+        }
+    }
+}
+
+/// An input that IS given but cannot be used is `InvalidArgument` naming it, and is never
+/// skipped in favor of its piped alternative: answering a malformed `sig` from `content`
+/// would hide the caller's mistake, and answering it "missing" would misname it.
+#[test]
+fn a_given_but_unusable_input_is_a_typed_invalid_argument() {
+    let k = kernel();
+    let graph = sign(&k, b"x", "urn:test:k1-priv");
+
+    // `sig` is not UTF-8, while a perfectly good graph sits in `content`.
+    let req = request_with(
+        "urn:sign:verify",
+        &[
+            ("in", b"x"),
+            ("sig", &[0xff, 0xfe]),
+            ("content", graph.as_bytes()),
+            ("key", b"urn:test:k1-pub"),
+        ],
+    );
+    let err = block_on(k.issue(req, &Capability::root())).unwrap_err();
+    assert!(
+        matches!(&err, CoreError::InvalidArgument { name, .. } if name == "sig"),
+        "got: {err:?}"
+    );
+
+    // `in` given by reference, not inline, while `content` carries bytes.
+    let req = Request::new(Verb::Source, Iri::parse("urn:sign:sign").unwrap())
+        .with_arg(
+            "in",
+            ArgRef::Reference(Iri::parse("urn:test:k1-pub").unwrap()),
+        )
+        .with_arg("content", ArgRef::Inline(b"x".to_vec()))
+        .with_arg("key", ArgRef::Inline(b"urn:test:k1-priv".to_vec()));
+    let err = block_on(k.issue(req, &Capability::scoped([CAP_SIGN]))).unwrap_err();
+    assert!(
+        matches!(&err, CoreError::InvalidArgument { name, .. } if name == "in"),
+        "got: {err:?}"
+    );
+
+    // `key` that is not UTF-8.
+    let req = request_with("urn:sign:sign", &[("in", b"x"), ("key", &[0xff])]);
+    let err = block_on(k.issue(req, &Capability::scoped([CAP_SIGN]))).unwrap_err();
+    assert!(
+        matches!(&err, CoreError::InvalidArgument { name, .. } if name == "key"),
+        "got: {err:?}"
+    );
+}
+
 // ---- describe / manifold: the declared contract --------------------------------------------
 
 #[test]
