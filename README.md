@@ -161,7 +161,7 @@ The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is con
 
 Both endpoints (and the crypto) are wasm-clean.
 
-## Unreleased
+## 0.3.1 (2026-10-14, a patch)
 
 - **A missing input is a typed refusal.** `sign` and `verify` refuse a call that
   leaves out `in`, `key` or `sig` (with no piped `content` standing in) with core's
@@ -171,6 +171,13 @@ Both endpoints (and the crypto) are wasm-clean.
   its own omission from a failure of the module. A given-but-unusable `in` or `sig`
   is no longer skipped in favor of `content`.
 - `ikigai-conformance` 0.8.0 (dev), whose REQUIRED check found the above.
+- Tests that kill the 14 survivors of a cargo-mutants run (ledger #1444); no library
+  change.
+
+**Why a patch.** No API changes. The kind of each refusal was already on the wire;
+the untyped answer was the defect. A call that gave a non-inline or non-UTF-8 `in`
+or `sig` beside a usable piped `content` used to be answered from `content` and is
+now refused, which only a malformed call can notice.
 
 ## 0.3.0 (2026-10-09)
 
