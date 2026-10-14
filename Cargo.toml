@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sign"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.87"   # measured: oxrdf/oxrdfio/oxttl 0.x require 1.87; clippy + test pass on 1.87
 license = "MIT OR Apache-2.0"

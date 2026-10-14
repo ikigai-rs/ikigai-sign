@@ -161,6 +161,16 @@ The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is con
 
 Both endpoints (and the crypto) are wasm-clean.
 
+## 0.3.2 (2026-10-14, a patch)
+
+- **An unparseable key IRI is a typed refusal too.** `sign` and `verify` refuse a
+  `key` that is not an IRI with `InvalidArgument` naming `key`, as they already did
+  for a disallowed scheme; before, it was an untyped endpoint error (ledger #1495,
+  PR 19).
+- **The manifest declares `rust-version = "1.87"`**, measured: the oxrdf family needs
+  it, and the shared CI's MSRV job now runs at 1.87 instead of skipping (ledger #232,
+  PR 18).
+
 ## 0.3.1 (2026-10-14, a patch)
 
 - **A missing input is a typed refusal.** `sign` and `verify` refuse a call that
