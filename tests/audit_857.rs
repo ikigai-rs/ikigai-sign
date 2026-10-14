@@ -415,6 +415,26 @@ fn a_key_iri_outside_urn_and_file_is_refused_before_resolution() {
     )));
 }
 
+/// An unparseable key IRI is a typed `InvalidArgument` on `key`, like a disallowed scheme —
+/// not an untyped `Endpoint` error.
+#[test]
+fn an_unparseable_key_iri_is_invalid_argument_on_key() {
+    let k = kernel_with(&[("urn:test:k1-priv", K1_PRIV.as_bytes().to_vec())]);
+    let graph = sign(&k, b"x", "urn:test:k1-priv");
+    for bad in ["not an iri", "", "urn:has space"] {
+        let signed = try_sign(&k, b"x", bad);
+        assert!(
+            matches!(&signed, Err(CoreError::InvalidArgument { name, .. }) if name == "key"),
+            "sign must refuse {bad:?} as InvalidArgument on key: {signed:?}"
+        );
+        let verified = verify(&k, b"x", &graph, bad);
+        assert!(
+            matches!(&verified, Err(CoreError::InvalidArgument { name, .. }) if name == "key"),
+            "verify must refuse {bad:?} as InvalidArgument on key: {verified:?}"
+        );
+    }
+}
+
 // =============================================================================================
 // Claims the auditors checked and found TRUE — pinned so they stay true.
 // =============================================================================================
