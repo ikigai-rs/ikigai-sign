@@ -65,6 +65,7 @@ futures = "0.3" # block_on for the async endpoint tests
 # The module recipe as one test (`tests/conformance.rs`): walks every bound
 # endpoint and reports every violation at once. 0.6.0 added SPACE-NAME (a self-named space
 # claims `urn:iki:space:<module>`), 0.7.0 VALIDATE, and 0.8.0 REQUIRED (a dropped required
-# input must be refused with a typed MissingArgument). A 0.x caret is a CEILING too:
-# `"0.8.0"` means `<0.9.0`.
-ikigai-conformance = "0.8.0"
+# input must be refused with a typed MissingArgument), 0.9.0 core 0.1.105's contract-shape
+# checks and RECOMPUTE, 0.10.0 FAILURES (off unless a suite opts in). A 0.x caret is a CEILING
+# too: `"0.10.0"` means `<0.11.0`.
+ikigai-conformance = "0.10.0"
