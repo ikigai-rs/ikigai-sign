@@ -140,10 +140,13 @@ nothing — the thread is the keystore's to name and to cut.
 
 Passes [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance)
 (`tests/conformance.rs`): every check, no opt-outs, over both keystore kinds and
-both algorithms. The `sig:` terms live under `https://ikigai-rs.dev/ns/sign#` —
-this crate's own namespace (`ikigai_sign::SIG_NS`), registered with the suite as
-such. It is defined here and in the crate docs, not yet served as a vocabulary
-document.
+both algorithms. Emitted `sig:` terms are checked against this crate's vocabulary.
+
+The `sig:` vocabulary is defined in [`src/vocabulary.ttl`](src/vocabulary.ttl),
+exported as `ikigai_sign::VOCABULARY_TTL`, and published separately from
+ikigai-vocab at <https://ikigai-rs.dev/ns/sign>. The public `SIG_*` term constants
+let other producers reuse its IRIs. Deployment to `/ns/sign` is manual, after the
+crate is published.
 
 ## Portable code, made safe
 

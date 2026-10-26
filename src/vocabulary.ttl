@@ -1,0 +1,37 @@
+@prefix sig: <https://ikigai-rs.dev/ns/sign#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<https://ikigai-rs.dev/ns/sign> a owl:Ontology ;
+    rdfs:label "ikigai signature vocabulary" ;
+    rdfs:comment "Terms for deterministic RDF signature graphs and shared signature metadata. Properties have no domain so other producers can describe subjects that are not signatures." ;
+    owl:versionInfo "0.3.2" .
+
+sig:Signature a rdfs:Class ;
+    rdfs:label "Signature" ;
+    rdfs:comment "A signature node in an RDF signature graph. The graph contains exactly one such node, named by an algorithm-tagged hash of the signature value." .
+
+sig:algorithm a rdf:Property ;
+    rdfs:label "Signature algorithm" ;
+    rdfs:comment "The signature algorithm identifier: Ed25519 or ES256, selected from the signing key. A reader dispatches on this value and refuses any other value rather than assuming an algorithm." ;
+    rdfs:range xsd:string .
+
+sig:signer a rdf:Property ;
+    rdfs:label "Signer public key" ;
+    rdfs:comment "The base64-encoded public key in the algorithm's own encoding: raw 32 bytes for Ed25519 or SPKI DER for ES256. Its length does not identify the algorithm; read algorithm first. Informational in a signature graph: verification uses the caller-provided public key." ;
+    rdfs:range xsd:string .
+
+sig:value a rdf:Property ;
+    rdfs:label "Signature value" ;
+    rdfs:comment "The base64-encoded 64-byte signature for either algorithm: Ed25519 R followed by S, or ES256 fixed-width r followed by s, never DER. ES256 s is in the low half of the group order: signing normalizes to low-S and verification refuses high-S. The width does not identify the algorithm." ;
+    rdfs:range xsd:string .
+
+sig:contentHash a rdf:Property ;
+    rdfs:label "Content hash" ;
+    rdfs:comment "The algorithm-tagged digest of the signed bytes, emitted as sha256:<hex> with lowercase hexadecimal. Verification accepts an untagged legacy digest as SHA-256 and refuses unknown tags. This property is also used on subjects that are not signatures." ;
+    rdfs:range xsd:string .
+
+# signer and value are base64 text emitted as plain RDF string literals, not
+# xsd:base64Binary-typed literals. Their ranges match that wire representation.

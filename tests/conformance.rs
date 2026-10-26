@@ -41,11 +41,8 @@
 //!
 //! ## The `sig:` namespace
 //!
-//! The signature-graph's terms live under `https://ikigai-rs.dev/ns/sign#`
-//! ([`ikigai_sign::SIG_NS`]) — this crate's own, named in its README and
-//! registered with `Suite::namespace`, so VOCABULARY holds the face to `rdf:` plus
-//! that namespace and nothing else. What the check cannot see: the namespace is
-//! defined by this crate's documentation, not served as a vocabulary document.
+//! The signature-graph's terms are defined in [`ikigai_sign::VOCABULARY_TTL`].
+//! `Suite::vocabulary` checks every emitted term against that document.
 //!
 //! ## The space's name
 //!
@@ -219,10 +216,10 @@ fn sign(kernel: &Kernel, message: &str) -> String {
 }
 
 /// The suite, configured for this module (see the file docs for why each line):
-/// the module's namespace, its self-named space, and one fixture per action.
+/// the module's vocabulary, its self-named space, and one fixture per action.
 fn suite(graph: &str) -> Suite {
     Suite::new()
-        .namespace(ikigai_sign::SIG_NS)
+        .vocabulary(ikigai_sign::VOCABULARY_TTL)
         // `space()` is configuration-free, so it claims `urn:iki:space:sign`. The
         // walked kernel is anonymous: the keystore binds onto it, which drops the name.
         .self_named_space("sign", ikigai_sign::space)

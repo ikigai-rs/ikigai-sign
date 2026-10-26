@@ -1119,3 +1119,37 @@ fn endpoints_carry_their_diagnostic_names() {
     assert_eq!(Sign.name(), "sign");
     assert_eq!(Verify.name(), "verify");
 }
+
+/// The vocabulary describes the literals actually emitted by both algorithms,
+/// including base64 text (plain xsd:string, not typed xsd:base64Binary).
+#[test]
+fn signature_literals_match_vocabulary_ranges() {
+    let parse = |turtle: &str| {
+        RdfParser::from_format(RdfFormat::Turtle)
+            .for_slice(turtle.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let vocabulary = parse(VOCABULARY_TTL);
+    for key in [K1_PRIV, P256_PRIV] {
+        let signer = AnySigner::parse(key.as_bytes()).unwrap();
+        let graph = sign_to_graph(b"vocabulary ranges", &signer).unwrap();
+        for quad in parse(&graph) {
+            if quad.predicate.as_str() == RDF_TYPE {
+                continue;
+            }
+            let ranges: Vec<_> = vocabulary.iter().filter(|q| {
+                matches!(&q.subject, oxrdf::NamedOrBlankNode::NamedNode(node) if node == &quad.predicate)
+                    && q.predicate.as_str() == "http://www.w3.org/2000/01/rdf-schema#range"
+            }).map(|q| &q.object).collect();
+            let Term::Literal(value) = &quad.object else {
+                panic!("signature property must be a literal: {quad}");
+            };
+            assert_eq!(
+                ranges,
+                [&Term::NamedNode(value.datatype().into_owned())],
+                "{quad}"
+            );
+        }
+    }
+}
