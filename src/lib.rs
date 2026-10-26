@@ -76,12 +76,10 @@
 //!
 //! ## The `sig:` vocabulary
 //!
-//! Self-contained in this crate under `https://ikigai-rs.dev/ns/sign#` (see [`SIG_NS`]), and
-//! deliberately **not** part of the shared `ikigai-rs.dev/ns` vocabulary — so no `/ns` deploy
-//! is owed. The `sig:Signature` / `sig:algorithm` / `sig:signer` / `sig:value` /
-//! `sig:contentHash` terms are the ones to promote if it graduates. `ikigai-conformance`'s
-//! VOCABULARY check knows the namespace as this crate's own (`Suite::namespace`); it is
-//! defined by this documentation and the README, not served as a vocabulary document.
+//! Defined in [`VOCABULARY_TTL`] under `https://ikigai-rs.dev/ns/sign#` (see [`SIG_NS`]).
+//! The vocabulary is published separately from ikigai-vocab at
+//! <https://ikigai-rs.dev/ns/sign>; deployment to that URL is manual after publishing
+//! this crate. Conformance checks emitted terms against this document.
 //!
 //! **A second producer exists** as of 2026-08-23: `ikigai-log`'s `#seal` lines carry
 //! `sig:contentHash` / `sig:value` rather than minting parallel terms. That is exactly why the
@@ -119,31 +117,62 @@ use std::collections::{BTreeMap, BTreeSet};
 /// shim, and it costs one string comparison.
 pub const CAP_SIGN: &str = "urn:cap:sign";
 
-/// The signature vocabulary namespace. Self-contained in this crate (no `/ns` deploy).
+/// The signature vocabulary as Turtle, deployed manually to <https://ikigai-rs.dev/ns/sign>.
+///
+/// ```
+/// assert!(ikigai_sign::VOCABULARY_TTL.contains("owl:Ontology"));
+/// ```
+pub const VOCABULARY_TTL: &str = include_str!("vocabulary.ttl");
+
+/// The signature vocabulary namespace, defined in [`VOCABULARY_TTL`].
+///
+/// ```
+/// assert_eq!(ikigai_sign::SIG_NS, "https://ikigai-rs.dev/ns/sign#");
+/// ```
 pub const SIG_NS: &str = "https://ikigai-rs.dev/ns/sign#";
 
 /// `sig:Signature` — the class of the signature node.
-const SIG_SIGNATURE: &str = "https://ikigai-rs.dev/ns/sign#Signature";
-/// `sig:algorithm` — the signature algorithm id: [`ALG_ED25519`] or [`ALG_ES256`], chosen by
+///
+/// ```
+/// assert_eq!(ikigai_sign::SIG_SIGNATURE, "https://ikigai-rs.dev/ns/sign#Signature");
+/// ```
+pub const SIG_SIGNATURE: &str = "https://ikigai-rs.dev/ns/sign#Signature";
+/// `sig:algorithm` — the signature algorithm id: `Ed25519` or `ES256`, chosen by
 /// the key the signer was parsed from. **Not a constant.** It was `Ed25519` for every graph
 /// this module emitted before 0.2.0; since 0.2.0 `urn:sign:sign` dispatches on key type and
 /// verification dispatches on this literal, so a consumer branching on it has two arms to
 /// write and a third to refuse. (Refuse, do not assume: an unknown algorithm read as Ed25519
 /// would mint a confident verdict on a check that never happened — the same reasoning as
-/// [`content_hash_sha256_hex`]'s unknown-tag arm.)
-const SIG_ALGORITHM: &str = "https://ikigai-rs.dev/ns/sign#algorithm";
+/// the content hash reader's unknown-tag arm.)
+///
+/// ```
+/// assert_eq!(ikigai_sign::SIG_ALGORITHM, "https://ikigai-rs.dev/ns/sign#algorithm");
+/// ```
+pub const SIG_ALGORITHM: &str = "https://ikigai-rs.dev/ns/sign#algorithm";
 /// `sig:signer` — the base64-encoded public key of the signer, **in this algorithm's own
 /// encoding**: a raw 32-byte key for `Ed25519`, an SPKI DER document for `ES256`. The two are
 /// not interchangeable and the length does not identify them — read `sig:algorithm` first.
-const SIG_SIGNER: &str = "https://ikigai-rs.dev/ns/sign#signer";
+///
+/// ```
+/// assert_eq!(ikigai_sign::SIG_SIGNER, "https://ikigai-rs.dev/ns/sign#signer");
+/// ```
+pub const SIG_SIGNER: &str = "https://ikigai-rs.dev/ns/sign#signer";
 /// `sig:value` — the base64-encoded 64-byte signature: Ed25519's `R‖S`, or ES256's `r‖s`
 /// (fixed-width, not DER — the Enclave's DER output is converted at the sign-through
 /// boundary), with ES256's `s` always in the LOW half of the group order: `urn:sign:sign` emits
 /// low-S and `urn:sign:verify` refuses high-S (since 0.2.3). Same width for both algorithms,
 /// so the width proves nothing about which.
-const SIG_VALUE: &str = "https://ikigai-rs.dev/ns/sign#value";
+///
+/// ```
+/// assert_eq!(ikigai_sign::SIG_VALUE, "https://ikigai-rs.dev/ns/sign#value");
+/// ```
+pub const SIG_VALUE: &str = "https://ikigai-rs.dev/ns/sign#value";
 /// `sig:contentHash` — the **algorithm-tagged** digest of the signed bytes: `sha256:<hex>`.
-const SIG_CONTENT_HASH: &str = "https://ikigai-rs.dev/ns/sign#contentHash";
+///
+/// ```
+/// assert_eq!(ikigai_sign::SIG_CONTENT_HASH, "https://ikigai-rs.dev/ns/sign#contentHash");
+/// ```
+pub const SIG_CONTENT_HASH: &str = "https://ikigai-rs.dev/ns/sign#contentHash";
 
 /// The digest-algorithm tag every emitted digest carries — in `sig:contentHash`
 /// (`sha256:<hex>`) and, since 0.2.1, in the signature node's own IRI
