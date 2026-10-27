@@ -63,15 +63,49 @@ impl Endpoint for OwnedKey {
     }
 }
 
-/// A kernel over this crate's `space()` plus three bound key resources.
+/// A kernel over this crate's `space()` plus the bound key resources.
 fn kernel() -> Kernel {
-    let space = space()
+    Kernel::new(Arc::new(test_space()))
+}
+
+/// [`kernel`]'s space, for a test that binds more beside it.
+fn test_space() -> ikigai_core::EndpointSpace {
+    space()
         .bind(Exact::new("urn:test:k1-priv"), StaticKey(K1_PRIV))
         .bind(Exact::new("urn:test:k1-pub"), StaticKey(K1_PUB))
         .bind(Exact::new("urn:test:k2-pub"), StaticKey(K2_PUB))
         .bind(Exact::new("urn:test:p256-priv"), StaticKey(P256_PRIV))
-        .bind(Exact::new("urn:test:p256-pub"), StaticKey(P256_PUB));
-    Kernel::new(Arc::new(space))
+        .bind(Exact::new("urn:test:p256-pub"), StaticKey(P256_PUB))
+        .bind(Exact::new(BYTES_SIGN), BytesOnly(Sign))
+        .bind(Exact::new(BYTES_VERIFY), BytesOnly(Verify))
+}
+
+/// Where the test kernel binds the BYTES path of each endpoint: [`BytesOnly`] forwards only
+/// `invoke`, so the kernel reaches it through the default `invoke_body`, exactly as it reached
+/// every endpoint before bodies existed.
+const BYTES_SIGN: &str = "urn:test:bytes:sign";
+const BYTES_VERIFY: &str = "urn:test:bytes:verify";
+
+/// An endpoint with its `invoke_body` hidden: what the bytes path answers.
+struct BytesOnly<E>(E);
+
+#[async_trait]
+impl<E: Endpoint> Endpoint for BytesOnly<E> {
+    async fn invoke(&self, inv: &Invocation<'_>) -> CoreResult<Representation> {
+        self.0.invoke(inv).await
+    }
+}
+
+/// The same request, addressed to the bytes path of its endpoint.
+fn bytes_path(req: &Request) -> Request {
+    let target = match req.target.as_str() {
+        "urn:sign:sign" => BYTES_SIGN,
+        "urn:sign:verify" => BYTES_VERIFY,
+        other => panic!("not a sign endpoint: {other}"),
+    };
+    let mut req = req.clone();
+    req.target = Iri::parse(target).unwrap();
+    req
 }
 
 fn sign_request(message: &[u8], key_uri: &str) -> Request {
@@ -473,7 +507,9 @@ fn a_given_but_unusable_input_is_a_typed_invalid_argument() {
         "got: {err:?}"
     );
 
-    // `in` given by reference, not inline, while `content` carries bytes.
+    // `in` given by reference, not inline, while `content` carries bytes: the BYTES path
+    // (`invoke`) reads only inline values, so it refuses `in` by name. (The kernel calls the
+    // body path, which reads a reference — see `in_by_reference_is_read_on_the_body_path`.)
     let req = Request::new(Verb::Source, Iri::parse("urn:sign:sign").unwrap())
         .with_arg(
             "in",
@@ -481,7 +517,7 @@ fn a_given_but_unusable_input_is_a_typed_invalid_argument() {
         )
         .with_arg("content", ArgRef::Inline(b"x".to_vec()))
         .with_arg("key", ArgRef::Inline(b"urn:test:k1-priv".to_vec()));
-    let err = block_on(k.issue(req, &Capability::scoped([CAP_SIGN]))).unwrap_err();
+    let err = block_on(k.issue(bytes_path(&req), &Capability::scoped([CAP_SIGN]))).unwrap_err();
     assert!(
         matches!(&err, CoreError::InvalidArgument { name, .. } if name == "in"),
         "got: {err:?}"
@@ -1151,5 +1187,623 @@ fn signature_literals_match_vocabulary_ranges() {
                 "{quad}"
             );
         }
+    }
+}
+
+// ---- the body path (ledger #2285) ----------------------------------------------------------
+//
+// The kernel calls `invoke_body`, so every end-to-end test above already runs the body path
+// over an inline (`Bytes`) message. These hold it to the bytes path and pin what streaming
+// adds: which bodies each operation takes, how many times it reads them, that nothing is held
+// whole, and that every failure is a refusal, never a shorter answer.
+
+use ikigai_core::{cap_stream_memory, Body, ByteStream, Bytes, Replay};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A message generated chunk by chunk and never held whole — byte `i` is `i·31 + 7` — that
+/// counts how often it is opened and how many chunks are polled out of it.
+#[derive(Clone)]
+struct Pattern {
+    len: usize,
+    chunk: usize,
+    opens: Arc<AtomicUsize>,
+    polled: Arc<AtomicUsize>,
+    /// Flip the first byte on every open after the first: a replay that breaks its promise.
+    torn: bool,
+}
+
+impl Pattern {
+    fn new(len: usize, chunk: usize) -> Self {
+        Pattern {
+            len,
+            chunk,
+            opens: Arc::new(AtomicUsize::new(0)),
+            polled: Arc::new(AtomicUsize::new(0)),
+            torn: false,
+        }
+    }
+
+    fn byte(i: usize) -> u8 {
+        (i.wrapping_mul(31) + 7) as u8
+    }
+
+    /// The whole message, for comparisons on sizes small enough to hold.
+    fn whole(&self) -> Vec<u8> {
+        (0..self.len).map(Pattern::byte).collect()
+    }
+
+    /// How many chunks one full read polls.
+    fn chunks(&self) -> usize {
+        self.len.div_ceil(self.chunk)
+    }
+
+    /// A fresh one-shot read, counted chunk by chunk.
+    fn stream(&self) -> ByteStream {
+        use futures::StreamExt as _;
+        let (len, chunk, polled) = (self.len, self.chunk, Arc::clone(&self.polled));
+        let flip = self.torn && self.opens.load(Ordering::SeqCst) > 1;
+        Box::pin(
+            futures::stream::iter((0..len).step_by(chunk)).map(move |start| {
+                polled.fetch_add(1, Ordering::SeqCst);
+                let mut bytes: Vec<u8> = (start..(start + chunk).min(len))
+                    .map(Pattern::byte)
+                    .collect();
+                if flip && start == 0 {
+                    bytes[0] ^= 1;
+                }
+                Ok(Bytes::from(bytes))
+            }),
+        )
+    }
+
+    fn opens(&self) -> usize {
+        self.opens.load(Ordering::SeqCst)
+    }
+
+    fn polled(&self) -> usize {
+        self.polled.load(Ordering::SeqCst)
+    }
+}
+
+impl Replay for Pattern {
+    fn open(&self) -> ByteStream {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        self.stream()
+    }
+
+    fn len_hint(&self) -> Option<u64> {
+        Some(self.len as u64)
+    }
+}
+
+/// How a [`Served`] endpoint answers its body.
+#[derive(Clone, Copy)]
+enum Shape {
+    Replay,
+    Once,
+    /// A one-shot stream that yields one chunk and then fails: a producer dying part-way.
+    FailsPartWay,
+}
+
+/// An endpoint that answers a [`Pattern`] as a body, so a request can pass it BY REFERENCE
+/// and the endpoint under test reads it as a stream. Uncacheable, so every read reaches it.
+struct Served(Pattern, Shape);
+
+#[async_trait]
+impl Endpoint for Served {
+    async fn invoke(&self, _inv: &Invocation<'_>) -> CoreResult<Representation> {
+        Ok(Representation::new(
+            ReprType::new("application/octet-stream"),
+            self.0.whole(),
+        ))
+    }
+
+    async fn invoke_body(&self, _inv: &Invocation<'_>) -> CoreResult<Representation<Body>> {
+        let body = match self.1 {
+            Shape::Replay => Body::replay(self.0.clone()),
+            Shape::Once => Body::Once(self.0.stream()),
+            Shape::FailsPartWay => {
+                let first = Ok(Bytes::from(self.0.whole()[..1].to_vec()));
+                let died = Err(CoreError::Unavailable("the producer went away".into()));
+                Body::once(futures::stream::iter([first, died]))
+            }
+        };
+        Ok(Representation::from_body(
+            ReprType::new("application/octet-stream"),
+            body,
+        ))
+    }
+}
+
+/// Where a [`Served`] message is bound.
+const MSG: &str = "urn:test:msg";
+
+/// The test kernel with `pattern` served at [`MSG`] as `shape`.
+fn serving(pattern: &Pattern, shape: Shape) -> Kernel {
+    Kernel::new(Arc::new(
+        test_space().bind(Exact::new(MSG), Served(pattern.clone(), shape)),
+    ))
+}
+
+/// A reference argument.
+fn reference(iri: &str) -> ArgRef {
+    ArgRef::Reference(Iri::parse(iri).unwrap())
+}
+
+/// `urn:sign:sign` with `in` by reference to `target`.
+fn sign_ref(target: &str, key_uri: &str) -> Request {
+    Request::new(Verb::Source, Iri::parse("urn:sign:sign").unwrap())
+        .with_arg("in", reference(target))
+        .with_arg("key", ArgRef::Inline(key_uri.as_bytes().to_vec()))
+}
+
+/// `urn:sign:verify` with `in` by reference to `target`.
+fn verify_ref(target: &str, sig_graph: &str, key_uri: &str) -> Request {
+    Request::new(Verb::Source, Iri::parse("urn:sign:verify").unwrap())
+        .with_arg("in", reference(target))
+        .with_arg("sig", ArgRef::Inline(sig_graph.as_bytes().to_vec()))
+        .with_arg("key", ArgRef::Inline(key_uri.as_bytes().to_vec()))
+}
+
+/// Issue through the kernel's BODY API and collect the answer: what a streaming caller sees.
+fn issue_body_collected(k: &Kernel, req: Request, cap: &Capability) -> CoreResult<Vec<u8>> {
+    let repr = block_on(k.issue_body(req, cap))?;
+    Ok(block_on(repr.bytes.collect(usize::MAX))?.to_vec())
+}
+
+fn sign_cap() -> Capability {
+    Capability::scoped([CAP_SIGN])
+}
+
+/// The bytes path's answer and the body path's, for the same inline request: the three ways a
+/// caller can reach it (the kernel's bytes API, its body API collected, and the bytes path
+/// itself) give the same bytes or the same error. What conformance 0.12.0's BODIES holds.
+fn assert_paths_agree(k: &Kernel, req: &Request, cap: &Capability) -> CoreResult<Vec<u8>> {
+    let bytes = block_on(k.issue(bytes_path(req), cap)).map(|r| r.bytes);
+    let body_via_bytes_api = block_on(k.issue(req.clone(), cap)).map(|r| r.bytes);
+    let body = issue_body_collected(k, req.clone(), cap);
+    let shown =
+        |r: &CoreResult<Vec<u8>>| format!("{:?}", r.as_ref().map(|b| String::from_utf8_lossy(b)));
+    assert_eq!(
+        shown(&bytes),
+        shown(&body),
+        "bytes path vs body path, {req:?}"
+    );
+    assert_eq!(shown(&bytes), shown(&body_via_bytes_api), "{req:?}");
+    bytes
+}
+
+#[test]
+fn the_body_answer_collected_equals_the_bytes_answer() {
+    let k = kernel();
+    let large = Pattern::new(10_000, 333).whole();
+    for (private, public) in [
+        ("urn:test:k1-priv", "urn:test:k1-pub"),
+        ("urn:test:p256-priv", "urn:test:p256-pub"),
+    ] {
+        for message in [&b""[..], b"x", b"authentic message", &large] {
+            let graph = assert_paths_agree(&k, &sign_request(message, private), &sign_cap())
+                .expect("signs");
+            let graph = String::from_utf8(graph).unwrap();
+            for (msg, key) in [
+                (message, public),
+                (&b"tampered"[..], public),
+                (message, "urn:test:k2-pub"),
+            ] {
+                // A verdict, or (an Ed25519 key on an ES256 graph) the same error.
+                let _ =
+                    assert_paths_agree(&k, &verify_request(msg, &graph, key), &Capability::root());
+            }
+            // The refusals agree too: a missing key, a non-UTF-8 graph, a malformed graph.
+            let no_key = request_with("urn:sign:sign", &[("in", message)]);
+            assert_paths_agree(&k, &no_key, &sign_cap()).unwrap_err();
+            let bad_sig = request_with(
+                "urn:sign:verify",
+                &[
+                    ("in", message),
+                    ("sig", &[0xff]),
+                    ("key", public.as_bytes()),
+                ],
+            );
+            assert_paths_agree(&k, &bad_sig, &Capability::root()).unwrap_err();
+            let not_rdf = verify_request(message, "not turtle at all", public);
+            assert_paths_agree(&k, &not_rdf, &Capability::root()).unwrap_err();
+        }
+    }
+}
+
+/// The verdicts and errors of `verify_body` are `verify_message`'s, over every kind of body
+/// and on every arm — including the ones whose ORDER matters (a malformed key is an error only
+/// once the content hash matched; before that, the mismatch is the verdict).
+#[test]
+fn verify_paths_agree_on_every_verdict_and_error() {
+    let k = kernel();
+    let msg: &[u8] = b"a fact, signed once";
+    let ed = sign(&k, msg, "urn:test:k1-priv");
+    let es = sign(&k, msg, "urn:test:p256-priv");
+    let (k1, k2, p256) = (K1_PUB.as_bytes(), K2_PUB.as_bytes(), P256_PUB.as_bytes());
+    let value = |g: &str| parse_sig_graph(g).unwrap().value_b64;
+    let signer = |g: &str| parse_sig_graph(g).unwrap().signer_b64.unwrap();
+    let hash = |g: &str| parse_sig_graph(g).unwrap().content_hash;
+
+    // The weak-key forgery (see `weak_key_forgery_is_rejected_though_permissive_verify_accepts`)
+    // and a small-order `R` under an honest key.
+    let mut weak = [0u8; 32];
+    weak[0] = 1;
+    let mut identity_r = [0u8; 64];
+    identity_r[0] = 1;
+    let weak_spki = weak_key_spki(&weak);
+    let forged = ed
+        .replace(&signer(&ed), &B64.encode(weak))
+        .replace(&value(&ed), &B64.encode(identity_r));
+    let small_r = ed.replace(&value(&ed), &B64.encode(identity_r));
+    // ES256's key-less high-S twin.
+    let honest = P256Signature::from_slice(&B64.decode(value(&es)).unwrap()).unwrap();
+    let (r, s_) = honest.split_scalars();
+    let neg_s: p256::Scalar = -*s_;
+    let twin = P256Signature::from_scalars(p256::FieldBytes::from(r), neg_s.to_bytes()).unwrap();
+    let high_s = es.replace(&value(&es), &B64.encode(twin.to_bytes()));
+    let untagged = ed.replace(&hash(&ed), hash(&ed).trim_start_matches("sha256:"));
+
+    let cases: Vec<(&str, &[u8], String, &[u8])> = vec![
+        ("ed25519 valid", msg, ed.clone(), k1),
+        ("es256 valid", msg, es.clone(), p256),
+        ("ed25519 tampered", b"another fact", ed.clone(), k1),
+        ("es256 tampered", b"another fact", es.clone(), p256),
+        ("a different signer", msg, ed.clone(), k2),
+        (
+            "zeroed value",
+            msg,
+            ed.replace(&value(&ed), &B64.encode([0u8; 64])),
+            k1,
+        ),
+        ("weak-key forgery", msg, forged, &weak_spki),
+        ("small-order R", msg, small_r, k1),
+        ("high-S twin", msg, high_s, p256),
+        ("untagged digest", msg, untagged, k1),
+        ("unknown tag", msg, ed.replace("\"sha256:", "\"blake3:"), k1),
+        (
+            "unknown algorithm",
+            msg,
+            ed.replace("\"Ed25519\"", "\"Ed448\""),
+            k1,
+        ),
+        ("ed25519 key, es256 graph", msg, es.clone(), k1),
+        ("malformed key, hash matches", msg, ed.clone(), b"not a key"),
+        (
+            "malformed key, hash differs",
+            b"other",
+            ed.clone(),
+            b"not a key",
+        ),
+        ("value not base64", msg, ed.replace(&value(&ed), "!!!"), k1),
+        ("value too short", msg, ed.replace(&value(&ed), "AAAA"), k1),
+    ];
+    let render = |r: Result<Verdict, String>| r.map(|v| v.render());
+    for (name, message, graph, key) in cases {
+        let fields = parse_sig_graph(&graph).unwrap();
+        let expected = render(verify_message(message, &fields, key));
+        let pattern = |chunk| {
+            // A replay of exactly `message`, in `chunk`-byte pieces.
+            Arc::new(Chunked(Bytes::copy_from_slice(message), chunk)) as Arc<dyn Replay>
+        };
+        let bodies = [
+            Body::from(message.to_vec()),
+            Body::Replay(pattern(1)),
+            Body::Replay(pattern(7)),
+            Body::Once(pattern(3).open()),
+        ];
+        for body in bodies {
+            let got = block_on(verify_body(body, &fields, key)).expect("the message reads");
+            assert_eq!(render(got), expected, "{name}");
+        }
+    }
+}
+
+/// Exactly these bytes, served in `.1`-byte chunks.
+struct Chunked(Bytes, usize);
+
+impl Replay for Chunked {
+    fn open(&self) -> ByteStream {
+        let pieces: Vec<CoreResult<Bytes>> = self
+            .0
+            .chunks(self.1)
+            .map(|c| Ok(Bytes::copy_from_slice(c)))
+            .collect();
+        Box::pin(futures::stream::iter(pieces))
+    }
+}
+
+/// `sign_body` is `sign_to_graph`, byte for byte, over every kind of body it takes.
+#[test]
+fn sign_paths_agree_byte_for_byte() {
+    let ed = AnySigner::parse(K1_PRIV.as_bytes()).unwrap();
+    let es = AnySigner::parse(P256_PRIV.as_bytes()).unwrap();
+    for message in [&b""[..], b"x", &Pattern::new(5_000, 1).whole()] {
+        for signer in [&ed, &es] {
+            let expected = sign_to_graph(message, signer).unwrap();
+            let replay =
+                |chunk| Body::Replay(Arc::new(Chunked(Bytes::copy_from_slice(message), chunk)));
+            for body in [Body::from(message.to_vec()), replay(1), replay(64)] {
+                assert_eq!(block_on(sign_body(body, "in", signer)).unwrap(), expected);
+            }
+        }
+        let once = Body::Once(Chunked(Bytes::copy_from_slice(message), 5).open());
+        assert_eq!(
+            block_on(sign_body(once, "in", &es)).unwrap(),
+            sign_to_graph(message, &es).unwrap()
+        );
+    }
+}
+
+/// Ed25519 reads a replay twice (nonce, then challenge); ES256 once; verification once. The
+/// counts are the producer's own, not inferred.
+#[test]
+fn ed25519_signs_a_replay_in_two_passes_and_es256_and_verify_in_one() {
+    for (private, public, sign_opens) in [
+        ("urn:test:k1-priv", "urn:test:k1-pub", 2),
+        ("urn:test:p256-priv", "urn:test:p256-pub", 1),
+    ] {
+        let pattern = Pattern::new(4_000, 100);
+        let k = serving(&pattern, Shape::Replay);
+        let graph = String::from_utf8(
+            issue_body_collected(&k, sign_ref(MSG, private), &sign_cap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(graph, sign(&k, &pattern.whole(), private), "{private}");
+        assert_eq!(pattern.opens(), sign_opens, "{private}: opens to sign");
+        assert_eq!(pattern.polled(), sign_opens * pattern.chunks(), "{private}");
+
+        let verdict =
+            issue_body_collected(&k, verify_ref(MSG, &graph, public), &Capability::root());
+        assert!(String::from_utf8(verdict.unwrap())
+            .unwrap()
+            .starts_with("valid:"));
+        assert_eq!(
+            pattern.opens(),
+            sign_opens + 1,
+            "{public}: one more open to verify"
+        );
+    }
+}
+
+/// A one-shot message cannot be read twice, so Ed25519 refuses it — typed, naming the
+/// argument and `urn:stream:spill` — before reading a single chunk. It never spills.
+#[test]
+fn ed25519_refuses_a_one_shot_body_and_names_spill() {
+    for arg in ["in", "content"] {
+        let pattern = Pattern::new(1_000, 100);
+        let k = serving(&pattern, Shape::Once);
+        let req = Request::new(Verb::Source, Iri::parse("urn:sign:sign").unwrap())
+            .with_arg(arg, reference(MSG))
+            .with_arg("key", ArgRef::Inline(b"urn:test:k1-priv".to_vec()));
+        let err = block_on(k.issue_body(req, &sign_cap())).unwrap_err();
+        match &err {
+            CoreError::InvalidArgument { name, detail } => {
+                assert_eq!(name, arg);
+                assert!(detail.contains(ikigai_core::stream::SPILL), "{detail}");
+            }
+            other => panic!("expected InvalidArgument naming `{arg}`, got {other:?}"),
+        }
+        assert_eq!(pattern.polled(), 0, "refused before the stream was read");
+    }
+}
+
+/// ES256 signs a one-shot message in its single read, and either algorithm verifies one.
+#[test]
+fn a_one_shot_body_is_signed_by_es256_and_verified_by_both() {
+    let pattern = Pattern::new(3_000, 256);
+    let k = serving(&pattern, Shape::Once);
+    let graph = issue_body_collected(&k, sign_ref(MSG, "urn:test:p256-priv"), &sign_cap()).unwrap();
+    let graph = String::from_utf8(graph).unwrap();
+    assert_eq!(graph, sign(&k, &pattern.whole(), "urn:test:p256-priv"));
+    assert_eq!(pattern.polled(), pattern.chunks(), "one read");
+
+    for (private, public) in [
+        ("urn:test:k1-priv", "urn:test:k1-pub"),
+        ("urn:test:p256-priv", "urn:test:p256-pub"),
+    ] {
+        let graph = sign(&k, &pattern.whole(), private);
+        let before = pattern.polled();
+        let verdict =
+            issue_body_collected(&k, verify_ref(MSG, &graph, public), &Capability::root());
+        assert!(String::from_utf8(verdict.unwrap())
+            .unwrap()
+            .starts_with("valid:"));
+        assert_eq!(
+            pattern.polled() - before,
+            pattern.chunks(),
+            "{public}: one read"
+        );
+    }
+}
+
+/// An early stop, visible in the producer's counters: a `sig:contentHash` under a digest this
+/// module does not compute is refused before the message is opened at all.
+#[test]
+fn an_unknown_digest_tag_stops_before_the_message_is_read() {
+    for shape in [Shape::Replay, Shape::Once] {
+        let pattern = Pattern::new(100_000, 1_000);
+        let k = serving(&pattern, shape);
+        let graph =
+            sign(&k, &pattern.whole(), "urn:test:k1-priv").replace("\"sha256:", "\"blake3:");
+        let verdict = issue_body_collected(
+            &k,
+            verify_ref(MSG, &graph, "urn:test:k1-pub"),
+            &Capability::root(),
+        );
+        let verdict = String::from_utf8(verdict.unwrap()).unwrap();
+        assert!(
+            verdict.contains("unsupported content-hash algorithm `blake3`"),
+            "{verdict}"
+        );
+        assert_eq!((pattern.opens(), pattern.polled()), (0, 0), "never read");
+    }
+}
+
+/// A message 256 times the run's byte budget is signed and verified: it is never held whole.
+/// The control proves the budget is real — collecting the same message is `OverBudget`.
+#[test]
+fn a_message_far_past_the_byte_budget_is_never_held_whole() {
+    const BUDGET: u64 = 4_096;
+    let pattern = Pattern::new(1 << 20, 1_024);
+    let expected_hash = {
+        let mut digest = Sha256::new();
+        block_on(read_pass(Body::Once(pattern.stream()), |c| {
+            digest.update(c)
+        }))
+        .unwrap();
+        format!("sha256:{}", to_hex(&digest.finalize()))
+    };
+    for shape in [Shape::Replay, Shape::Once] {
+        let k = Kernel::new(Arc::new(
+            test_space().bind(Exact::new(MSG), Served(pattern.clone(), shape)),
+        ))
+        .with_stream_memory(BUDGET, BUDGET);
+        let collect = Request::new(
+            Verb::Source,
+            Iri::parse(ikigai_core::stream::COLLECT).unwrap(),
+        )
+        .with_arg("content", reference(MSG));
+        assert!(
+            matches!(
+                block_on(k.issue(collect, &sign_cap())),
+                Err(CoreError::OverBudget { .. })
+            ),
+            "the control: holding the message whole is past the budget"
+        );
+
+        let keys: &[(&str, &str)] = match shape {
+            Shape::Replay => &[
+                ("urn:test:k1-priv", "urn:test:k1-pub"),
+                ("urn:test:p256-priv", "urn:test:p256-pub"),
+            ],
+            _ => &[("urn:test:p256-priv", "urn:test:p256-pub")],
+        };
+        for (private, public) in keys {
+            let graph = block_on(k.issue(sign_ref(MSG, private), &sign_cap())).expect("signed");
+            let graph = String::from_utf8(graph.bytes).unwrap();
+            assert_eq!(parse_sig_graph(&graph).unwrap().content_hash, expected_hash);
+            let verdict = block_on(k.issue(verify_ref(MSG, &graph, public), &sign_cap()));
+            let verdict = String::from_utf8(verdict.expect("verified").bytes).unwrap();
+            assert!(verdict.starts_with("valid:"), "{private}: {verdict}");
+        }
+    }
+}
+
+/// What verify DOES hold whole — the signature-graph, which it parses — is collected under the
+/// run's byte budget: past it the answer is `OverBudget`, and a grant that raises the budget
+/// turns the same request into a verdict.
+#[test]
+fn past_the_byte_budget_the_answer_is_over_budget() {
+    let graph = sign(&kernel(), b"x", "urn:test:k1-priv");
+    let len = graph.len() as u64;
+    let k = Kernel::new(Arc::new(
+        test_space().bind(Exact::new("urn:test:graph"), StreamedText(graph.clone())),
+    ))
+    .with_stream_memory(len - 1, 1 << 20);
+    let req = Request::new(Verb::Source, Iri::parse("urn:sign:verify").unwrap())
+        .with_arg("in", ArgRef::Inline(b"x".to_vec()))
+        .with_arg("sig", reference("urn:test:graph"))
+        .with_arg("key", ArgRef::Inline(b"urn:test:k1-pub".to_vec()));
+    let plain = Capability::scoped(["urn:cap:read"]);
+    for result in [
+        block_on(k.issue(req.clone(), &plain)).map(|r| r.bytes),
+        issue_body_collected(&k, req.clone(), &plain),
+    ] {
+        assert!(
+            matches!(result, Err(CoreError::OverBudget { .. })),
+            "{result:?}"
+        );
+    }
+    let granted = Capability::scoped([cap_stream_memory(len)]);
+    let verdict = block_on(k.issue(req, &granted)).expect("within the raised budget");
+    assert!(String::from_utf8(verdict.bytes)
+        .unwrap()
+        .starts_with("valid:"));
+}
+
+/// Serves fixed text as a one-shot stream, one byte per chunk.
+struct StreamedText(String);
+
+#[async_trait]
+impl Endpoint for StreamedText {
+    async fn invoke(&self, _inv: &Invocation<'_>) -> CoreResult<Representation> {
+        Ok(Representation::new(
+            ReprType::new("text/turtle"),
+            self.0.as_bytes().to_vec(),
+        ))
+    }
+
+    async fn invoke_body(&self, _inv: &Invocation<'_>) -> CoreResult<Representation<Body>> {
+        Ok(Representation::from_body(
+            ReprType::new("text/turtle"),
+            Body::Once(Chunked(Bytes::from(self.0.clone().into_bytes()), 1).open()),
+        ))
+    }
+}
+
+/// A message stream that fails part-way ends the answer with ITS error: never a signature
+/// over the bytes before it, never a verdict on them.
+#[test]
+fn a_message_that_fails_part_way_is_an_error_not_an_answer() {
+    let pattern = Pattern::new(100, 10);
+    let k = serving(&pattern, Shape::FailsPartWay);
+    let graph = sign(&k, &pattern.whole(), "urn:test:p256-priv");
+    for (req, cap) in [
+        (sign_ref(MSG, "urn:test:p256-priv"), sign_cap()),
+        (
+            verify_ref(MSG, &graph, "urn:test:p256-pub"),
+            Capability::root(),
+        ),
+    ] {
+        let err = issue_body_collected(&k, req, &cap).unwrap_err();
+        assert!(matches!(err, CoreError::Unavailable(_)), "{err:?}");
+    }
+}
+
+/// Ed25519's two passes must read the same bytes. A replay that changes between them is a
+/// `Conflict`, never a signature over neither version.
+#[test]
+fn a_replay_that_changes_between_passes_is_a_conflict() {
+    let mut pattern = Pattern::new(500, 50);
+    pattern.torn = true;
+    let k = serving(&pattern, Shape::Replay);
+    let err = block_on(k.issue(sign_ref(MSG, "urn:test:k1-priv"), &sign_cap())).unwrap_err();
+    assert!(matches!(err, CoreError::Conflict(_)), "{err:?}");
+    assert_eq!(pattern.opens(), 2);
+}
+
+/// On the body path `in` is read in any of its forms: by reference it signs the referenced
+/// bytes, exactly as signing them inline.
+#[test]
+fn in_by_reference_is_read_on_the_body_path() {
+    let k = kernel();
+    let by_ref = block_on(k.issue(sign_ref("urn:test:k1-pub", "urn:test:k1-priv"), &sign_cap()))
+        .expect("signed");
+    assert_eq!(
+        String::from_utf8(by_ref.bytes).unwrap(),
+        sign(&k, K1_PUB.as_bytes(), "urn:test:k1-priv")
+    );
+}
+
+/// Both actions state their failure classes, so conformance's FAILURES compares them: past
+/// the byte budget (`over-budget`) and a malformed key or graph (`unknown`, an endpoint
+/// error); `permanent` (missing, invalid, conflict) is implied.
+#[test]
+fn both_actions_declare_their_failure_classes() {
+    use ikigai_core::FailureClass;
+    for description in [Sign.describe(), Verify.describe()] {
+        let source = description
+            .action_specs()
+            .into_iter()
+            .find(|a| a.verb == Verb::Source)
+            .expect("a Source action");
+        assert_eq!(
+            source.failures.classes(),
+            Some(&[FailureClass::OverBudget, FailureClass::Unknown][..]),
+            "{}",
+            description.id
+        );
     }
 }

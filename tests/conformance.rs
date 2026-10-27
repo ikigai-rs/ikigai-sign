@@ -53,8 +53,8 @@
 //!
 //! No opt-outs, and NAMES runs: both ids are kebab-case. DATATYPES (0.11.0) runs and is
 //! clean: the `text/turtle` face writes only plain string literals, against `sig:` properties
-//! whose range is `xsd:string`. FAILURES (0.11.0) runs too; no action states failure classes
-//! yet, so it compares nothing. REQUIRED (0.8.0) runs too: each
+//! whose range is `xsd:string`. FAILURES (0.11.0) runs too, and since 0.4.1 compares: both
+//! actions state `over-budget` and `unknown` (ledger #2285). REQUIRED (0.8.0) runs too: each
 //! required input (`in`, `key`, and `sig` on verify) dropped from a fixture call is refused
 //! with a typed `MissingArgument`; under 0.6 these were untyped endpoint errors, and the
 //! unit test `a_missing_required_input_is_a_typed_missing_argument` pins the fix.

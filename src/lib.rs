@@ -44,7 +44,30 @@
 //!
 //! On both endpoints a required input left out is core's typed `MissingArgument` naming it
 //! (`in`, `sig`, `key`; a piped `content` stands in for `in` on `sign` and for `sig` on
-//! `verify`), and one given but not an inline value is `InvalidArgument` naming it.
+//! `verify`). On the bytes path (`invoke`) one given but not an inline value is
+//! `InvalidArgument` naming it.
+//!
+//! ## Streamed messages (since 0.4.1)
+//!
+//! The kernel calls `invoke_body`, and there both endpoints read the message — `in`, or the
+//! piped `content` — as a **body**, in any of its forms (inline, by reference, by content id),
+//! hashing and signing or verifying it **as it is read, never holding it whole**, so a message
+//! far larger than the run's byte budget signs and verifies. The answer is byte-identical to
+//! the bytes path's. How often the message is read depends on the algorithm:
+//!
+//! - **Ed25519 signing reads it twice** (RFC 8032 without prehash hashes the message once
+//!   for the nonce and again for the challenge), so it takes a body that can be read again
+//!   (`Bytes`, `Replay`) and refuses a one-shot (`Once`) body with `InvalidArgument` naming
+//!   the argument and `urn:stream:spill`, the builtin that makes it re-readable. It never
+//!   spills on its own. If the two reads differ, the answer is `Conflict`, not a signature.
+//! - **ES256 signing reads it once**, and so does **verification** of either algorithm. A
+//!   `sig:contentHash` under an unknown digest tag is refused without reading it at all.
+//!
+//! The signature-graph `verify` parses is held whole, so it is collected under the run's byte
+//! budget (`urn:cap:stream:memory:<bytes>`): past it the answer is `OverBudget`. A message
+//! stream that fails part-way ends the answer with its error, never a signature or verdict
+//! over the bytes before it. Both actions declare their failure classes: `over-budget` and
+//! `unknown` (a malformed key or graph), with `permanent` implied.
 //!
 //! ## Keys
 //!
@@ -91,23 +114,28 @@
 
 use async_trait::async_trait;
 use base64::Engine as _;
+use ed25519_dalek::hazmat::{raw_sign_byupdate, ExpandedSecretKey};
 use ed25519_dalek::pkcs8::{spki::DecodePublicKey, DecodePrivateKey};
-use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, SigningKey, StreamVerifier, VerifyingKey};
+use futures_util::StreamExt;
 // The `signature` crate's traits, implemented by BOTH algorithms' keys — imported once and
 // used for Ed25519 and ES256 alike (this is the crypto-agility, at the trait level).
 use ikigai_core::{
-    space_iri, ArgSpec, Description, Endpoint, EndpointSpace, Error as CoreError, Exact,
-    Invocation, Iri, ReprType, Representation, Request, Result as CoreResult, Verb,
+    space_iri, ArgSpec, Body, Bytes, Description, Endpoint, EndpointSpace, Error as CoreError,
+    Exact, FailureClass, Invocation, Iri, Replay, ReprType, Representation, Request,
+    Result as CoreResult, Verb,
 };
 use oxrdf::Term;
 use oxrdfio::{RdfFormat, RdfParser};
-use p256::ecdsa::signature::{Signer, Verifier};
+use p256::ecdsa::signature::{DigestSigner, DigestVerifier, Signer, Verifier};
 use p256::ecdsa::{
     Signature as P256Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey,
 };
 use p256::pkcs8::EncodePublicKey;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// The capability gating "may sign at all." Declared on `urn:sign:sign` via
 /// [`Description::requires`], and so enforced by the kernel *before dispatch* (core 0.1.49
@@ -337,22 +365,25 @@ impl AnySigner {
                     B64.encode(k.verifying_key().to_bytes()),
                 ))
             }
-            AnySigner::Es256(k) => {
-                let sig: P256Signature = k.sign(message);
-                // Emit LOW-S. RFC 6979 fixes the nonce, not which of the two valid `s` values
-                // comes out, and p256 does not normalize — so about half of raw signatures
-                // are high-S, and `verify_es256` refuses those (one valid signature per
-                // (message, key), or the content-addressed node name is forgeable). Still
-                // deterministic: normalization is a pure function of the signature.
-                let sig = sig.normalize_s().unwrap_or(sig);
-                let spki = k
-                    .verifying_key()
-                    .to_public_key_der()
-                    .map_err(|e| format!("cannot encode the P-256 public key: {e}"))?;
-                Ok((B64.encode(sig.to_bytes()), B64.encode(spki.as_bytes())))
-            }
+            AnySigner::Es256(k) => es256_encode(k, k.sign(message)),
         }
     }
+}
+
+/// An ES256 signature and its signer in the wire encoding: `(base64 r‖s, base64 SPKI DER)`.
+/// Shared by the bytes path and the body path, so the two emit the same literals.
+fn es256_encode(k: &P256SigningKey, sig: P256Signature) -> Result<(String, String), String> {
+    // Emit LOW-S. RFC 6979 fixes the nonce, not which of the two valid `s` values comes out,
+    // and p256 does not normalize — so about half of raw signatures are high-S, and
+    // `verify_es256` refuses those (one valid signature per (message, key), or the
+    // content-addressed node name is forgeable). Still deterministic: normalization is a pure
+    // function of the signature.
+    let sig = sig.normalize_s().unwrap_or(sig);
+    let spki = k
+        .verifying_key()
+        .to_public_key_der()
+        .map_err(|e| format!("cannot encode the P-256 public key: {e}"))?;
+    Ok((B64.encode(sig.to_bytes()), B64.encode(spki.as_bytes())))
 }
 
 /// This key's `sig:signer` encoding for the Ed25519 algorithm — the raw 32-byte public key,
@@ -497,9 +528,17 @@ fn as_pem(bytes: &[u8]) -> Option<&str> {
 /// `signer` reports.
 fn sign_to_graph(message: &[u8], signer: &AnySigner) -> Result<String, String> {
     let (sig_b64, signer_b64) = signer.sign(message)?;
-    let algorithm = signer.algorithm();
-    let content_hash = tagged_content_hash(message);
+    Ok(render_graph(
+        signer.algorithm(),
+        &sig_b64,
+        &signer_b64,
+        &tagged_content_hash(message),
+    ))
+}
 
+/// The signature-graph for an already-made signature: the one renderer behind both the bytes
+/// path ([`sign_to_graph`]) and the body path ([`sign_body`]), so the two cannot drift apart.
+fn render_graph(algorithm: &str, sig_b64: &str, signer_b64: &str, content_hash: &str) -> String {
     // Skolemize: the node IRI is content-addressed on the (deterministic) signature bytes, so
     // the graph is stable and diffable and carries no blank node. WHAT it is derived from —
     // sha256 over the BASE64 TEXT of the signature — is load-bearing (see `verify_ed25519` and
@@ -540,17 +579,17 @@ fn sign_to_graph(message: &[u8], signer: &AnySigner) -> Result<String, String> {
     ));
     out.push_str(&format!(
         "<{node}> sig:signer {} .\n",
-        turtle_string(&signer_b64)
+        turtle_string(signer_b64)
     ));
     out.push_str(&format!(
         "<{node}> sig:value {} .\n",
-        turtle_string(&sig_b64)
+        turtle_string(sig_b64)
     ));
     out.push_str(&format!(
         "<{node}> sig:contentHash {} .\n",
-        turtle_string(&content_hash)
+        turtle_string(content_hash)
     ));
-    Ok(out)
+    out
 }
 
 /// Render a Rust string as a Turtle string literal, escaping the reserved characters so the
@@ -747,15 +786,7 @@ fn verify_message(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Resul
     let recomputed = content_hash_hex(message);
     let signed_hex = match content_hash_sha256_hex(&fields.content_hash) {
         Ok(hex) => hex,
-        Err(tag) => {
-            return Ok(Verdict::Invalid {
-                reason: format!(
-                    "unsupported content-hash algorithm `{tag}` in sig:contentHash \
-                     (this module computes {HASH_ALG_SHA256}); refusing to assume it is \
-                     {HASH_ALG_SHA256}"
-                ),
-            })
-        }
+        Err(tag) => return Ok(unsupported_hash_verdict(tag)),
     };
     if recomputed != signed_hex {
         return Ok(Verdict::Invalid {
@@ -769,11 +800,36 @@ fn verify_message(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Resul
     match fields.algorithm.as_str() {
         ALG_ED25519 => verify_ed25519(message, fields, key_bytes),
         ALG_ES256 => verify_es256(message, fields, key_bytes),
-        other => Ok(Verdict::Invalid {
-            reason: format!(
-                "unsupported algorithm `{other}` (this module verifies {ALG_ED25519}, {ALG_ES256})"
-            ),
-        }),
+        other => Ok(unsupported_algorithm_verdict(other)),
+    }
+}
+
+/// The verdict on a `sig:contentHash` whose digest tag this module does not compute.
+fn unsupported_hash_verdict(tag: &str) -> Verdict {
+    Verdict::Invalid {
+        reason: format!(
+            "unsupported content-hash algorithm `{tag}` in sig:contentHash (this module \
+             computes {HASH_ALG_SHA256}); refusing to assume it is {HASH_ALG_SHA256}"
+        ),
+    }
+}
+
+/// The verdict on a `sig:algorithm` this module does not verify.
+fn unsupported_algorithm_verdict(algorithm: &str) -> Verdict {
+    Verdict::Invalid {
+        reason: format!(
+            "unsupported algorithm `{algorithm}` (this module verifies {ALG_ED25519}, {ALG_ES256})"
+        ),
+    }
+}
+
+/// The verdict on a high-S ES256 signature (see [`verify_es256`]).
+fn high_s_verdict() -> Verdict {
+    Verdict::Invalid {
+        reason: "high-S ES256 signature: s is in the upper half of the group order, the \
+                 non-canonical twin of a low-S signature; this module admits exactly one valid \
+                 signature per (message, key) and accepts only the low-S form"
+            .to_string(),
     }
 }
 
@@ -814,7 +870,7 @@ fn verify_ed25519(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Resul
             signer_b64: provided,
         },
         Err(_) => Verdict::Invalid {
-            reason: "signature does not verify against the provided public key".to_string(),
+            reason: DOES_NOT_VERIFY.to_string(),
         },
     })
 }
@@ -838,12 +894,7 @@ fn verify_es256(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Result<
     // never have produced. A verdict, not an error: the graph is well-formed, it just does not
     // carry the one signature this module accepts.
     if signature.normalize_s().is_some() {
-        return Ok(Verdict::Invalid {
-            reason: "high-S ES256 signature: s is in the upper half of the group order, the \
-                     non-canonical twin of a low-S signature; this module admits exactly one \
-                     valid signature per (message, key) and accepts only the low-S form"
-                .to_string(),
-        });
+        return Ok(high_s_verdict());
     }
     Ok(match key.verify(message, &signature) {
         Ok(()) => Verdict::Valid {
@@ -851,7 +902,7 @@ fn verify_es256(message: &[u8], fields: &SigFields, key_bytes: &[u8]) -> Result<
             signer_b64: provided,
         },
         Err(_) => Verdict::Invalid {
-            reason: "signature does not verify against the provided public key".to_string(),
+            reason: DOES_NOT_VERIFY.to_string(),
         },
     })
 }
@@ -862,6 +913,366 @@ fn p256_signer_b64(key: &P256VerifyingKey) -> Result<String, String> {
     key.to_public_key_der()
         .map(|d| B64.encode(d.as_bytes()))
         .map_err(|e| format!("cannot encode the P-256 public key: {e}"))
+}
+
+// =====================================================================================
+// The body path (ledger #2285): the same sign and verify over a message that arrives as a
+// streamed body — hashed as it is read, never held whole. Kernel-free like the core above;
+// `Sign::invoke_body` and `Verify::invoke_body` are its only callers.
+//
+// How many passes each operation makes over the message, and so which bodies it takes:
+//
+// | operation       | passes | `Bytes` | `Replay`        | `Once`                         |
+// |-----------------|--------|---------|-----------------|--------------------------------|
+// | Ed25519 sign    | 2      | yes     | opened twice    | refused: `InvalidArgument`     |
+// | ES256 sign      | 1      | yes     | opened once     | read once                      |
+// | verify (either) | 1      | yes     | opened once     | read once                      |
+//
+// Ed25519 (RFC 8032, without prehash) hashes the message twice while signing: once for the
+// nonce `r`, once for the challenge `k`, which needs `R = rB` from the first. A one-shot body
+// cannot be read a second time, so it is refused with a pointer to `urn:stream:spill`, which
+// turns it into a body that can; sign never spills on its own (a spill writes to the host's
+// disk under the CALLER's disk budget, which is the caller's to spend). Ed25519ph would sign
+// in one pass, but it is a different algorithm with different signatures, and `sig:value`
+// stays what it always was. ES256 hashes once (SHA-256, which is also `sig:contentHash`), and
+// verification of either algorithm is one pass.
+// =====================================================================================
+
+/// A message body that can be read again: what Ed25519 signing needs. A `Once` body has no
+/// such form; [`Rereadable::of`] says so.
+enum Rereadable {
+    Bytes(Bytes),
+    Replay(Arc<dyn Replay>),
+}
+
+impl Rereadable {
+    /// The body, if it can be read again; a one-shot body is handed back untouched.
+    fn of(body: Body) -> Result<Rereadable, Body> {
+        match body {
+            Body::Bytes(bytes) => Ok(Rereadable::Bytes(bytes)),
+            Body::Replay(replay) => Ok(Rereadable::Replay(replay)),
+            once @ Body::Once(_) => Err(once),
+        }
+    }
+
+    /// A fresh read from the first byte.
+    fn open(&self) -> Body {
+        match self {
+            Rereadable::Bytes(bytes) => Body::Bytes(bytes.clone()),
+            Rereadable::Replay(replay) => Body::Replay(Arc::clone(replay)),
+        }
+    }
+}
+
+/// Read `body` once, start to end, handing each chunk to `each` and holding none of them.
+/// A stream that fails part-way ends the read with ITS error — a reader never takes the chunks
+/// before an error item as the whole message (refuse, never truncate).
+async fn read_pass(body: Body, mut each: impl FnMut(&[u8])) -> CoreResult<()> {
+    let mut stream = body.into_stream();
+    while let Some(chunk) = stream.next().await {
+        each(&chunk?);
+    }
+    Ok(())
+}
+
+/// Sign a streamed message: the body-path twin of [`sign_to_graph`], byte-identical to it for
+/// the same `(message, key)`. `arg` names the argument the message came in, for the refusal.
+///
+/// Ed25519 reads a re-readable message twice and refuses a one-shot one; ES256 reads once.
+async fn sign_body(message: Body, arg: &str, signer: &AnySigner) -> CoreResult<String> {
+    let fail = |e: String| CoreError::Endpoint(format!("urn:sign:sign: {e}"));
+    match signer {
+        AnySigner::Ed25519(key) => {
+            let message = Rereadable::of(message).map_err(|_| CoreError::InvalidArgument {
+                name: arg.to_string(),
+                detail: format!(
+                    "urn:sign:sign: an {ALG_ED25519} key signs in two passes over the message, \
+                     and `{arg}` is a one-shot stream that can be read only once; make it \
+                     re-readable first with `{}` (or sign with an {ALG_ES256} key, which reads \
+                     once)",
+                    ikigai_core::stream::SPILL
+                ),
+            })?;
+            let (sig, content_hash) = sign_ed25519_passes(&message, key).await?;
+            Ok(render_graph(
+                ALG_ED25519,
+                &B64.encode(sig.to_bytes()),
+                &B64.encode(key.verifying_key().to_bytes()),
+                &content_hash,
+            ))
+        }
+        AnySigner::Es256(key) => {
+            let mut digest = Sha256::new();
+            read_pass(message, |chunk| digest.update(chunk)).await?;
+            let content_hash = format!("{HASH_ALG_SHA256}:{}", to_hex(&digest.clone().finalize()));
+            let sig: P256Signature = key.sign_digest(digest);
+            let (sig_b64, signer_b64) = es256_encode(key, sig).map_err(fail)?;
+            Ok(render_graph(
+                ALG_ES256,
+                &sig_b64,
+                &signer_b64,
+                &content_hash,
+            ))
+        }
+    }
+}
+
+/// Ed25519 over a message read twice, with ed25519-dalek's own signing
+/// ([`raw_sign_byupdate`]): the library computes `r`, `R`, `k` and `s`; this function only
+/// supplies the two message hashes it asks for.
+///
+/// `raw_sign_byupdate` asks for the message through a SYNCHRONOUS callback, called twice,
+/// and a body is read asynchronously. So each hash is computed here, in its own pass, and the
+/// callback hands the library the finished hasher state — the state it would have reached
+/// hashing the message itself:
+///
+/// 1. pass 1 hashes `prefix ‖ M` (the nonce hash, seeded as the library seeds it) and the
+///    content hash;
+/// 2. a first library call takes that state, derives `R`, seeds the challenge hash with
+///    `R ‖ A`, and this callback captures that seeded state and stops the call;
+/// 3. pass 2 hashes `M` into the captured state (and the content hash again);
+/// 4. a second library call takes both finished states and signs. Signing is deterministic,
+///    so its `R` is the one step 2 seeded.
+///
+/// The two passes must read the same bytes, or the signature is over neither: a
+/// [`Replay`] promises it, and this checks it — the content hash of each pass is compared,
+/// and a mismatch is a [`CoreError::Conflict`], never a signature.
+async fn sign_ed25519_passes(
+    message: &Rereadable,
+    key: &SigningKey,
+) -> CoreResult<(Signature, String)> {
+    let expanded = ExpandedSecretKey::from(&key.to_bytes());
+    let verifying = key.verifying_key();
+    let fail = |e: ed25519_dalek::SignatureError| {
+        CoreError::Endpoint(format!("urn:sign:sign: Ed25519 signing failed: {e}"))
+    };
+
+    // Pass 1: the nonce hash and the content hash.
+    let mut nonce = Sha512::new_with_prefix(expanded.hash_prefix);
+    let mut first = Sha256::new();
+    read_pass(message.open(), |chunk| {
+        nonce.update(chunk);
+        first.update(chunk);
+    })
+    .await?;
+
+    // Learn the challenge hash's seed (`R ‖ A`), then stop the call.
+    let seeded: RefCell<Option<Sha512>> = RefCell::new(None);
+    let calls = Cell::new(0u8);
+    let probe = raw_sign_byupdate::<Sha512, _>(
+        &expanded,
+        |h: &mut Sha512| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                *h = nonce.clone();
+                Ok(())
+            } else {
+                *seeded.borrow_mut() = Some(h.clone());
+                Err(ed25519_dalek::SignatureError::new())
+            }
+        },
+        &verifying,
+    );
+    let mut challenge = match (probe, seeded.into_inner()) {
+        (Err(_), Some(seeded)) => seeded,
+        (Err(e), None) => return Err(fail(e)),
+        // The callback stops the call at its second message, so this cannot happen; kept
+        // total (no panic) all the same.
+        (Ok(_), _) => {
+            return Err(CoreError::Endpoint(
+                "urn:sign:sign: Ed25519 signing did not ask for the message twice".into(),
+            ))
+        }
+    };
+
+    // Pass 2: the challenge hash, and the content hash again to prove the reads agree.
+    let mut second = Sha256::new();
+    read_pass(message.open(), |chunk| {
+        challenge.update(chunk);
+        second.update(chunk);
+    })
+    .await?;
+    let (first, second) = (first.finalize(), second.finalize());
+    if first != second {
+        return Err(CoreError::Conflict(format!(
+            "urn:sign:sign: the message read differently on the second of Ed25519's two passes \
+             ({HASH_ALG_SHA256}:{} then {HASH_ALG_SHA256}:{}); it changed while it was being \
+             signed, so nothing was signed",
+            to_hex(&first),
+            to_hex(&second)
+        )));
+    }
+
+    let calls = Cell::new(0u8);
+    let sig = raw_sign_byupdate::<Sha512, _>(
+        &expanded,
+        |h: &mut Sha512| {
+            calls.set(calls.get() + 1);
+            *h = if calls.get() == 1 {
+                nonce.clone()
+            } else {
+                challenge.clone()
+            };
+            Ok(())
+        },
+        &verifying,
+    )
+    .map_err(fail)?;
+    Ok((sig, format!("{HASH_ALG_SHA256}:{}", to_hex(&first))))
+}
+
+/// What a verification needs before it reads the message: the algorithm's check, set up from
+/// the graph and the key, or the verdict already reached without the crypto. Either is used
+/// only once the message's content hash matched — the ORDER of [`verify_message`], whose
+/// verdict and errors this reproduces exactly.
+enum Check {
+    /// Strict Ed25519, one pass: `verify_strict`'s two small-order checks were made up front
+    /// (`order_ok`), and its challenge hash runs over the message as it streams.
+    Ed25519 {
+        verifier: Box<StreamVerifier>,
+        order_ok: bool,
+        signer_b64: String,
+    },
+    /// ES256: low-S already checked; the SHA-256 of the message is its digest.
+    Es256 {
+        key: Box<P256VerifyingKey>,
+        signature: P256Signature,
+        signer_b64: String,
+    },
+    /// A verdict reached from the graph and key alone (a different signer, a high-S
+    /// signature, an unsupported algorithm, a signature that cannot verify for any message).
+    Decided(Verdict),
+}
+
+/// The same failure text as [`verify_ed25519`] and [`verify_es256`].
+const DOES_NOT_VERIFY: &str = "signature does not verify against the provided public key";
+
+/// Set up the check for `fields` and `key_bytes`: [`verify_ed25519`] / [`verify_es256`] up to
+/// the point where they read the message, with the same errors in the same order.
+fn prepare_check(fields: &SigFields, key_bytes: &[u8]) -> Result<Check, String> {
+    let does_not_verify = || {
+        Check::Decided(Verdict::Invalid {
+            reason: DOES_NOT_VERIFY.to_string(),
+        })
+    };
+    match fields.algorithm.as_str() {
+        ALG_ED25519 => {
+            let key = parse_ed25519_public(key_bytes)?;
+            let provided = ed25519_signer_b64(&key);
+            if let Some(v) = signer_mismatch(fields, &provided) {
+                return Ok(Check::Decided(v));
+            }
+            let sig_bytes = B64
+                .decode(fields.value_b64.as_bytes())
+                .map_err(|e| format!("sig:value is not valid base64: {e}"))?;
+            let signature = Signature::from_slice(&sig_bytes)
+                .map_err(|e| format!("sig:value is not a 64-byte Ed25519 signature: {e}"))?;
+            // `verify_strict` is the stream verifier plus two checks it makes before hashing:
+            // `R` decompresses, and neither `R` nor `A` is of small order (the weak-key
+            // forgery). Made here, by the library's own predicates, with the same outcome.
+            let order_ok = VerifyingKey::from_bytes(signature.r_bytes())
+                .is_ok_and(|r| !r.is_weak())
+                && !key.is_weak();
+            match key.verify_stream(&signature) {
+                Ok(verifier) => Ok(Check::Ed25519 {
+                    verifier: Box::new(verifier),
+                    order_ok,
+                    signer_b64: provided,
+                }),
+                Err(_) => Ok(does_not_verify()),
+            }
+        }
+        ALG_ES256 => {
+            let key = parse_p256_public(key_bytes)?;
+            let provided = p256_signer_b64(&key)?;
+            if let Some(v) = signer_mismatch(fields, &provided) {
+                return Ok(Check::Decided(v));
+            }
+            let sig_bytes = B64
+                .decode(fields.value_b64.as_bytes())
+                .map_err(|e| format!("sig:value is not valid base64: {e}"))?;
+            let signature = P256Signature::from_slice(&sig_bytes)
+                .map_err(|e| format!("sig:value is not a 64-byte P-256 (ES256) signature: {e}"))?;
+            if signature.normalize_s().is_some() {
+                return Ok(Check::Decided(high_s_verdict()));
+            }
+            Ok(Check::Es256 {
+                key: Box::new(key),
+                signature,
+                signer_b64: provided,
+            })
+        }
+        other => Ok(Check::Decided(unsupported_algorithm_verdict(other))),
+    }
+}
+
+/// Verify a streamed message: the body-path twin of [`verify_message`], with its verdicts and
+/// errors, reading the message ONCE and holding none of it. The outer `Err` is the message
+/// stream's own failure (passed on, never turned into a verdict); the inner `Err` is
+/// [`verify_message`]'s, a graph or key too malformed to verify with.
+///
+/// The graph and key are checked before the message is read, but a problem with them is
+/// reported only where [`verify_message`] reports it — after the content hash matched — so
+/// the two paths give the same answer for the same inputs. One case needs no read at all:
+/// a `sig:contentHash` under an unknown digest tag is refused before the body is opened.
+async fn verify_body(
+    message: Body,
+    fields: &SigFields,
+    key_bytes: &[u8],
+) -> CoreResult<Result<Verdict, String>> {
+    let signed_hex = match content_hash_sha256_hex(&fields.content_hash) {
+        Ok(hex) => hex,
+        Err(tag) => return Ok(Ok(unsupported_hash_verdict(tag))),
+    };
+    let mut check = prepare_check(fields, key_bytes);
+
+    let mut digest = Sha256::new();
+    read_pass(message, |chunk| {
+        digest.update(chunk);
+        if let Ok(Check::Ed25519 { verifier, .. }) = &mut check {
+            verifier.update(chunk);
+        }
+    })
+    .await?;
+
+    let recomputed = to_hex(&digest.clone().finalize());
+    if recomputed != signed_hex {
+        return Ok(Ok(Verdict::Invalid {
+            reason: format!(
+                "content hash mismatch (signed {}, got {HASH_ALG_SHA256}:{recomputed})",
+                fields.content_hash
+            ),
+        }));
+    }
+    Ok(check.map(|check| match check {
+        Check::Decided(verdict) => verdict,
+        Check::Ed25519 {
+            verifier,
+            order_ok,
+            signer_b64,
+        } => match order_ok && verifier.finalize_and_verify().is_ok() {
+            true => Verdict::Valid {
+                algorithm: ALG_ED25519.to_string(),
+                signer_b64,
+            },
+            false => Verdict::Invalid {
+                reason: DOES_NOT_VERIFY.to_string(),
+            },
+        },
+        Check::Es256 {
+            key,
+            signature,
+            signer_b64,
+        } => match key.verify_digest(digest, &signature) {
+            Ok(()) => Verdict::Valid {
+                algorithm: ALG_ES256.to_string(),
+                signer_b64,
+            },
+            Err(_) => Verdict::Invalid {
+                reason: DOES_NOT_VERIFY.to_string(),
+            },
+        },
+    }))
 }
 
 // =====================================================================================
@@ -920,6 +1331,33 @@ impl Endpoint for Sign {
         .cacheable())
     }
 
+    /// The body path (ledger #2285): `in` (or `content`) as a body in any of its forms —
+    /// inline, by reference, by content id — signed as it is read and never held whole.
+    /// Ed25519 reads it twice, so a one-shot body is refused with `InvalidArgument` naming
+    /// the argument and `urn:stream:spill`; ES256 reads it once. The answer, the refusals
+    /// and their order are [`invoke`](Endpoint::invoke)'s for the same inline input.
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> CoreResult<Representation<Body>> {
+        if !inv.capability.allows(CAP_SIGN) {
+            return Err(CoreError::Denied(format!(
+                "urn:sign:sign requires the {CAP_SIGN} capability"
+            )));
+        }
+
+        let (arg, message) = read_body(inv, &["in", "content"]).await?;
+        let key_repr = resolve_key(inv, "urn:sign:sign").await?;
+        let signer = AnySigner::parse(&key_repr.bytes)
+            .map_err(|e| CoreError::Endpoint(format!("urn:sign:sign: {e}")))?;
+
+        let graph = sign_body(message, arg, &signer).await?;
+        Ok(Representation::from_body(
+            ReprType::new(MEDIA_TURTLE).with_param("charset", "utf-8"),
+            graph.into_bytes(),
+        )
+        // As `invoke`: a pure function of (bytes, key). A message read by reference was read
+        // through the kernel too, so its freshness folds in beside the key's.
+        .cacheable())
+    }
+
     fn name(&self) -> &str {
         "sign"
     }
@@ -969,6 +1407,8 @@ impl Endpoint for Sign {
                     .class(RDFS_RESOURCE),
             )
             .output(MEDIA_TURTLE)
+            .fails(FailureClass::OverBudget)
+            .fails(FailureClass::Unknown)
     }
 }
 
@@ -994,6 +1434,29 @@ impl Endpoint for Verify {
         )
         // Pure function of (bytes, sig-graph, key); the key folds in its freshness via
         // `inv.source`. Deterministic ⇒ cacheable.
+        .cacheable())
+    }
+
+    /// The body path (ledger #2285): `in` as a body in any of its forms, hashed and verified
+    /// in ONE pass as it is read, never held whole; `sig` (or `content`) likewise, but
+    /// collected under the run's byte budget first, since the graph is parsed whole
+    /// (`OverBudget` past it, never a shorter graph). The verdict, the refusals and their
+    /// order are [`invoke`](Endpoint::invoke)'s for the same inline inputs.
+    async fn invoke_body(&self, inv: &Invocation<'_>) -> CoreResult<Representation<Body>> {
+        let (_, message) = read_body(inv, &["in"]).await?;
+        let sig_turtle = read_text(inv, &["sig", "content"]).await?;
+        let fields = parse_sig_graph(&sig_turtle)
+            .map_err(|e| CoreError::Endpoint(format!("urn:sign:verify: {e}")))?;
+
+        let key_repr = resolve_key(inv, "urn:sign:verify").await?;
+        let verdict = verify_body(message, &fields, &key_repr.bytes)
+            .await?
+            .map_err(|e| CoreError::Endpoint(format!("urn:sign:verify: {e}")))?;
+
+        Ok(Representation::from_body(
+            ReprType::new(MEDIA_PLAIN).with_param("charset", "utf-8"),
+            verdict.render().into_bytes(),
+        )
         .cacheable())
     }
 
@@ -1049,6 +1512,8 @@ impl Endpoint for Verify {
                     .class(RDFS_RESOURCE),
             )
             .output(MEDIA_PLAIN)
+            .fails(FailureClass::OverBudget)
+            .fails(FailureClass::Unknown)
     }
 }
 
@@ -1084,6 +1549,34 @@ fn first_present<T>(names: &[&str], read: impl Fn(&str) -> CoreResult<T>) -> Cor
         }
     }
     Err(CoreError::MissingArgument(names[0].to_string()))
+}
+
+/// The body behind the first present argument among `names`, with the name it came in: the
+/// body-path twin of [`read_bytes`]. An argument in any of its three forms is read
+/// ([`Invocation::content_body`]: inline, by reference — a sub-request, recorded — or by
+/// content id); none of `names` given is `MissingArgument` naming `names[0]`. Presence is
+/// decided by the request, never by an error: a referenced body that fails with a
+/// `MissingArgument` of its own is that failure, not a reason to try the alternative.
+async fn read_body<'n>(inv: &Invocation<'_>, names: &[&'n str]) -> CoreResult<(&'n str, Body)> {
+    for &name in names {
+        if inv.request.args.contains_key(name) {
+            return Ok((name, inv.content_body(name).await?));
+        }
+    }
+    Err(CoreError::MissingArgument(names[0].to_string()))
+}
+
+/// The first present argument among `names` as UTF-8 text: the body-path twin of
+/// [`read_str`]. The body is collected under the run's byte budget
+/// ([`Invocation::collect`]) — `OverBudget` past it, never truncated — and text that is not
+/// UTF-8 is `InvalidArgument` naming the argument, as `read_str` refuses it.
+async fn read_text(inv: &Invocation<'_>, names: &[&str]) -> CoreResult<String> {
+    let (name, body) = read_body(inv, names).await?;
+    let bytes = inv.collect(body).await?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| CoreError::InvalidArgument {
+        name: name.to_string(),
+        detail: "not valid UTF-8".to_string(),
+    })
 }
 
 /// The URI schemes a `key=` IRI may use. Keys are local resources — a file, a keystore, a

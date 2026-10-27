@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sign"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.87"   # measured: oxrdf/oxrdfio/oxttl 0.x require 1.87; clippy + test pass on 1.87
 license = "MIT OR Apache-2.0"
@@ -15,7 +15,8 @@ categories = ["cryptography", "web-programming"]
 # The published kernel, consumed from crates.io — the SAME version the hosts use, so a host
 # links exactly one `ikigai-core`. 0.2.0 is the streams release (ledger #2261); the old
 # "0.1.89" pin meant >=0.1.89, <0.2.0 under 0.x caret rules, so it could never reach it.
-ikigai-core = "0.2.0"
+# 0.2.1 is the floor of the body path (`invoke_body`, `content_body`, the run's byte budget).
+ikigai-core = "0.2.1"
 async-trait = "0.1"
 
 # Ed25519 (RFC 8032, deterministic signatures) over standard PKCS8/SPKI keys. `pkcs8`+`pem`
@@ -23,7 +24,11 @@ async-trait = "0.1"
 # so an `openssl genpkey -algorithm ed25519` key or a future `urn:secret:*` both load with no
 # bespoke encoding. NO `rand_core` — this module never generates keys (that is the secrets
 # module's job), so it pulls no RNG. Pure Rust (curve25519-dalek) ⇒ wasm-clean.
-ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem"] }
+#
+# `hazmat` is for the BODY path only (ledger #2285): `verify_stream` (one pass) and
+# `raw_sign_byupdate` (the two passes Ed25519 signing makes over the message), so a streamed
+# message is signed and verified without being held whole. No key material is derived by hand.
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "pkcs8", "pem", "hazmat"] }
 
 # ES256 (ECDSA over NIST P-256 + SHA-256) — the SECOND signature algorithm, and the one the
 # Apple Secure Enclave / TPMs speak (they cannot hold Ed25519). Signing is RFC-6979
@@ -40,6 +45,10 @@ sec1 = { version = "0.7.3", default-features = false, features = ["der", "pem"] 
 
 # SHA-256 for `sig:contentHash` (RustCrypto, pure Rust, wasm-clean).
 sha2 = "0.10"
+
+# `StreamExt::next`, to read a streamed message body chunk by chunk. Already in the graph under
+# ikigai-core (which defines `ByteStream` over it); no executor, wasm-clean.
+futures-util = { version = "0.3", default-features = false }
 
 # Base64 for the `sig:signer` (public key) and `sig:value` (signature) literals.
 base64 = "0.22"
