@@ -164,6 +164,19 @@ The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is con
 
 Both endpoints (and the crypto) are wasm-clean.
 
+## 0.4.0 (unreleased, a minor: core 0.2.0)
+
+- **On `ikigai-core` 0.2.0**, the streams release (ledger #2261). Core's types are in
+  this crate's API, so moving cores is a breaking change for consumers: a host must be
+  on core 0.2.0 too, or it links two cores. No code change was needed (ledger #2334).
+- **The `sig:` vocabulary** (`src/vocabulary.ttl`, exported as
+  `ikigai_sign::VOCABULARY_TTL`) defines every term the signature-graph emits; its
+  `owl:versionInfo` is the crate version (ledger #231, PR 23).
+- Pins: `ikigai-core` 0.2.0, `ikigai-conformance` 0.11.0 (dev, from crates.io again
+  instead of a git rev). Its DATATYPES check runs and is clean (every `sig:` literal is
+  a plain string against an `xsd:string` range), and FAILURES runs with nothing to
+  compare: no action states failure classes.
+
 ## 0.3.2 (2026-10-14, a patch)
 
 - **An unparseable key IRI is a typed refusal too.** `sign` and `verify` refuse a

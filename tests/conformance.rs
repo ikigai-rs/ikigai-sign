@@ -51,7 +51,10 @@
 //! walk runs on binds the keystore onto that space, which drops the name (core
 //! 0.1.89): the claim is about the constructor, not the extended space.
 //!
-//! No opt-outs (FAILURES is off until a suite opts in), and NAMES runs: both ids are kebab-case. REQUIRED (0.8.0) runs too: each
+//! No opt-outs, and NAMES runs: both ids are kebab-case. DATATYPES (0.11.0) runs and is
+//! clean: the `text/turtle` face writes only plain string literals, against `sig:` properties
+//! whose range is `xsd:string`. FAILURES (0.11.0) runs too; no action states failure classes
+//! yet, so it compares nothing. REQUIRED (0.8.0) runs too: each
 //! required input (`in`, `key`, and `sig` on verify) dropped from a fixture call is refused
 //! with a typed `MissingArgument`; under 0.6 these were untyped endpoint errors, and the
 //! unit test `a_missing_required_input_is_a_typed_missing_argument` pins the fix.
@@ -237,7 +240,7 @@ fn suite(graph: &str) -> Suite {
 }
 
 /// The walk saw the two module endpoints and the two fixture keys, one Source
-/// action each, and skipped only the opt-in FAILURES check. A third module endpoint bound without a line
+/// action each, and skipped no check. A third module endpoint bound without a line
 /// here would be held to a weaker standard; a declared id that binds nothing is a
 /// stale list.
 fn assert_shape(report: &Report) {
@@ -246,12 +249,12 @@ fn assert_shape(report: &Report) {
         "sign, verify, key-private, key-public: {report}"
     );
     assert_eq!(report.actions, 4, "one Source action each: {report}");
-    // FAILURES is OFF unless a suite opts in (`check_failures()`, the next wave): it is
-    // the one check allowed to be skipped.
+    // Since 0.11.0 every check runs by default, DATATYPES and FAILURES included: none
+    // may be skipped.
     assert_eq!(
         report.checks.skipped().collect::<Vec<_>>(),
-        [Check::Failures],
-        "every check but FAILURES runs: {report}"
+        [] as [Check; 0],
+        "every check runs: {report}"
     );
 }
 
