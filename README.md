@@ -164,6 +164,30 @@ The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is con
 
 Both endpoints (and the crypto) are wasm-clean.
 
+## 0.4.1 (unreleased, a patch: streamed messages)
+
+- **`sign` and `verify` read a streamed message** (ledger #2285). Both endpoints now
+  answer `invoke_body`, the method the kernel calls: the message (`in`, or a piped
+  `content`) is read as a body in any form (inline, by reference, by content id) and
+  hashed as it arrives, never held whole, so a message far past the run's byte budget
+  signs and verifies. The answer is byte-identical to the bytes path's (`invoke`, which
+  is unchanged and still reads only inline values).
+  - **Ed25519 signing reads the message twice** (without prehash, RFC 8032 hashes it for
+    the nonce and again for the challenge), so it needs a body that can be read again; a
+    one-shot body is refused with `InvalidArgument` naming the argument and
+    `urn:stream:spill`, which makes one re-readable. Sign never spills on its own. Two
+    reads that differ are a `Conflict`, never a signature.
+  - **ES256 signing and all verification read it once.** A `sig:contentHash` under an
+    unknown digest tag is refused before the message is opened.
+  - The signature-graph `verify` parses is collected under the run's byte budget:
+    `OverBudget` past it. A message stream that fails part-way ends the answer with its
+    error.
+  - Both actions declare their failure classes (`over-budget`, `unknown`), so
+    conformance's FAILURES check compares them.
+- Pins `ikigai-core` 0.2.1; enables ed25519-dalek's `hazmat` feature (its streaming
+  verifier and two-pass signer: no curve arithmetic here) and names `futures-util`
+  (already in the graph under core).
+
 ## 0.4.0 (unreleased, a minor: core 0.2.0)
 
 - **On `ikigai-core` 0.2.0**, the streams release (ledger #2261). Core's types are in
