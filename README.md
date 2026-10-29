@@ -167,7 +167,16 @@ The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is con
 
 Both endpoints (and the crypto) are wasm-clean.
 
-## 0.4.1 (unreleased, a patch: streamed messages)
+## 0.4.2 (a patch: body arguments declared)
+
+- **Every argument read as a body is declared `reads_body`** (sign `in`, `content`;
+  verify `in`, `sig`, `content`). From core 0.2.5 the kernel collects an undeclared
+  by-reference argument itself, so on 0.2.5+ a streamed message was held whole (and one
+  past the run's byte budget refused): five body-path unit tests failed against it.
+- Pins `ikigai-core` 0.2.4 (`ArgSpec::reads_body`) and `ikigai-conformance` 0.12.0 (dev:
+  BODIES and BODY-INPUTS).
+
+## 0.4.1 (a patch: streamed messages)
 
 - **`sign` and `verify` read a streamed message** (ledger #2285). Both endpoints now
   answer `invoke_body`, the method the kernel calls: the message (`in`, or a piped
@@ -187,16 +196,11 @@ Both endpoints (and the crypto) are wasm-clean.
     error.
   - Both actions declare their failure classes (`over-budget`, `unknown`), so
     conformance's FAILURES check compares them.
-- **Every argument read as a body is declared `reads_body`** (sign `in`, `content`;
-  verify `in`, `sig`, `content`). From core 0.2.5 the kernel collects an undeclared
-  by-reference argument itself, so on 0.2.5+ a streamed message was held whole (and one
-  past the run's byte budget refused): five body-path unit tests failed against it.
-- Pins `ikigai-core` 0.2.4 (`ArgSpec::reads_body`), `ikigai-conformance` 0.12.0 (dev:
-  BODIES and BODY-INPUTS); enables ed25519-dalek's `hazmat` feature (its streaming
+- Pins `ikigai-core` 0.2.1; enables ed25519-dalek's `hazmat` feature (its streaming
   verifier and two-pass signer: no curve arithmetic here) and names `futures-util`
   (already in the graph under core).
 
-## 0.4.0 (unreleased, a minor: core 0.2.0)
+## 0.4.0 (a minor: core 0.2.0)
 
 - **On `ikigai-core` 0.2.0**, the streams release (ledger #2261). Core's types are in
   this crate's API, so moving cores is a breaking change for consumers: a host must be
