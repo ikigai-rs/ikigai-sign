@@ -139,8 +139,11 @@ nothing — the thread is the keystore's to name and to cut.
 ## Conformance
 
 Passes [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance)
-(`tests/conformance.rs`): every check, no opt-outs, over both keystore kinds and
-both algorithms. Emitted `sig:` terms are checked against this crate's vocabulary.
+(`tests/conformance.rs`, 0.12.0): every check over both keystore kinds and both
+algorithms, with one opt-out: under an Ed25519 key, BODY-INPUTS is waived for `sign`,
+which refuses a one-shot `in` (Ed25519 signs in two passes; see below). The ES256 walk
+holds `sign` to all four input forms. Emitted `sig:` terms are checked against this
+crate's vocabulary.
 
 The `sig:` vocabulary is defined in [`src/vocabulary.ttl`](src/vocabulary.ttl),
 exported as `ikigai_sign::VOCABULARY_TTL`, and published separately from
@@ -184,7 +187,12 @@ Both endpoints (and the crypto) are wasm-clean.
     error.
   - Both actions declare their failure classes (`over-budget`, `unknown`), so
     conformance's FAILURES check compares them.
-- Pins `ikigai-core` 0.2.1; enables ed25519-dalek's `hazmat` feature (its streaming
+- **Every argument read as a body is declared `reads_body`** (sign `in`, `content`;
+  verify `in`, `sig`, `content`). From core 0.2.5 the kernel collects an undeclared
+  by-reference argument itself, so on 0.2.5+ a streamed message was held whole (and one
+  past the run's byte budget refused): five body-path unit tests failed against it.
+- Pins `ikigai-core` 0.2.4 (`ArgSpec::reads_body`), `ikigai-conformance` 0.12.0 (dev:
+  BODIES and BODY-INPUTS); enables ed25519-dalek's `hazmat` feature (its streaming
   verifier and two-pass signer: no curve arithmetic here) and names `futures-util`
   (already in the graph under core).
 
