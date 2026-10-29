@@ -7,7 +7,7 @@
 <https://ikigai-rs.dev/ns/sign> a owl:Ontology ;
     rdfs:label "ikigai signature vocabulary" ;
     rdfs:comment "Terms for deterministic RDF signature graphs and shared signature metadata. Properties have no domain so other producers can describe subjects that are not signatures." ;
-    owl:versionInfo "0.4.1" .
+    owl:versionInfo "0.4.2" .
 
 sig:Signature a rdfs:Class ;
     rdfs:label "Signature" ;
