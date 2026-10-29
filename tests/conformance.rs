@@ -51,7 +51,20 @@
 //! walk runs on binds the keystore onto that space, which drops the name (core
 //! 0.1.89): the claim is about the constructor, not the extended space.
 //!
-//! No opt-outs, and NAMES runs: both ids are kebab-case. DATATYPES (0.11.0) runs and is
+//! BODIES (0.12.0) compares each endpoint's `invoke` with its `invoke_body`, resolving in
+//! the module's own space, so the suite is handed the SAME `Arc` the kernel was built from
+//! (`Suite::body_space`). Over the threaded keystore it probes all four endpoints; over the
+//! live one the answers are uncacheable and it reports each as unprobed, by design.
+//!
+//! BODY-INPUTS (0.12.0) compares every argument declared `reads_body` (`in` and `content`
+//! on sign; `in`, `sig` and `content` on verify) inline, by reference, as a stored `b3:`
+//! content id (the kernel's [`MemoryContentStore`], shared through
+//! `Suite::body_input_store`) and as a one-shot attached body. One opt-out, under Ed25519
+//! only: `sign` refuses a one-shot `in`, because an Ed25519 signature is two passes over
+//! the message and the module will not hold it whole (ledger #2285) — the ES256 walk holds
+//! `sign` to all four forms.
+//!
+//! Otherwise no opt-outs, and NAMES runs: both ids are kebab-case. DATATYPES (0.11.0) runs and is
 //! clean: the `text/turtle` face writes only plain string literals, against `sig:` properties
 //! whose range is `xsd:string`. FAILURES (0.11.0) runs too, and since 0.4.1 compares: both
 //! actions state `over-budget` and `unknown` (ledger #2285). REQUIRED (0.8.0) runs too: each
@@ -62,8 +75,8 @@
 use async_trait::async_trait;
 use ikigai_conformance::{Check, Fixture, Report, Suite};
 use ikigai_core::{
-    ArgRef, Capability, Description, Endpoint, Exact, Invocation, Iri, Kernel, ReprType,
-    Representation, Request, Result as CoreResult, Verb,
+    ArgRef, Capability, Description, Endpoint, EndpointSpace, Exact, Invocation, Iri, Kernel,
+    MemoryContentStore, ReprType, Representation, Request, Result as CoreResult, Verb,
 };
 use std::sync::{Arc, RwLock};
 
@@ -162,11 +175,26 @@ impl Endpoint for Key {
     }
 }
 
-/// The module's space with one keypair bound as kernel resources, and a handle to
-/// the private key so a test can rotate it. `threaded` selects the keystore's kind
-/// (see the file docs): every key under a golden thread named after its IRI, or
-/// every key live.
-fn keystore(keys: &Keypair, threaded: bool) -> (Kernel, Arc<RwLock<&'static str>>) {
+/// The kernel the walk runs on, and the handles the suite and the tests hold beside it.
+struct Keystore {
+    kernel: Kernel,
+    /// The SAME `Arc` the kernel was built from: BODIES (0.12.0) compares each
+    /// endpoint's `invoke` and `invoke_body` directly, resolving in that space, since
+    /// both kernel methods dispatch `invoke_body`.
+    space: Arc<EndpointSpace>,
+    /// The kernel's content store, shared with the suite so BODY-INPUTS (0.12.0) can
+    /// pass a `reads_body` argument as a stored `b3:` content id.
+    store: Arc<MemoryContentStore>,
+    /// The private key's PEM, so a test can rotate it in place.
+    private: Arc<RwLock<&'static str>>,
+    /// The keypair's algorithm, as `sig:algorithm` names it.
+    algorithm: &'static str,
+}
+
+/// The module's space with one keypair bound as kernel resources. `threaded` selects
+/// the keystore's kind (see the file docs): every key under a golden thread named
+/// after its IRI, or every key live.
+fn keystore(keys: &Keypair, threaded: bool) -> Keystore {
     let private = Arc::new(RwLock::new(keys.private));
     let thread = |name: &'static str| threaded.then_some(name);
     let space = ikigai_sign::space()
@@ -186,7 +214,16 @@ fn keystore(keys: &Keypair, threaded: bool) -> (Kernel, Arc<RwLock<&'static str>
                 thread: thread(PUBLIC_THREAD),
             },
         );
-    (Kernel::new(Arc::new(space)), private)
+    let space = Arc::new(space);
+    let store = Arc::new(MemoryContentStore::new(1024 * 1024));
+    let kernel = Kernel::new(space.clone()).with_content_store(store.clone());
+    Keystore {
+        kernel,
+        space,
+        store,
+        private,
+        algorithm: keys.algorithm,
+    }
 }
 
 fn sign_request(message: &str) -> Request {
@@ -219,9 +256,29 @@ fn sign(kernel: &Kernel, message: &str) -> String {
 }
 
 /// The suite, configured for this module (see the file docs for why each line):
-/// the module's vocabulary, its self-named space, and one fixture per action.
-fn suite(graph: &str) -> Suite {
-    Suite::new()
+/// the module's vocabulary, its self-named space, the walked kernel's own space for
+/// BODIES and its content store for BODY-INPUTS, and one fixture per action.
+fn suite(graph: &str, keystore: &Keystore) -> Suite {
+    let suite = Suite::new();
+    // Ed25519 signs in two passes over the message (RFC 8032: once for the nonce, once
+    // for the challenge), so `sign` refuses a one-shot attached `in` with a typed
+    // InvalidArgument naming `urn:stream:spill`, rather than holding the message whole
+    // (ledger #2285; the unit test `ed25519_refuses_a_one_shot_body_and_names_spill`
+    // pins it). ES256 reads once, and its walk holds `sign` to all four input forms.
+    let suite = if keystore.algorithm == ED25519.algorithm {
+        suite.opt_out_check(
+            SIGN,
+            Check::BodyInputs,
+            "an Ed25519 key signs in two passes over the message, so a one-shot attached \
+             `in` is refused (typed InvalidArgument naming urn:stream:spill) rather than \
+             held whole; the ES256 walk compares all four forms",
+        )
+    } else {
+        suite
+    };
+    suite
+        .body_space(Arc::clone(&keystore.space))
+        .body_input_store(Arc::clone(&keystore.store))
         .vocabulary(ikigai_sign::VOCABULARY_TTL)
         // `space()` is configuration-free, so it claims `urn:iki:space:sign`. The
         // walked kernel is anonymous: the keystore binds onto it, which drops the name.
@@ -249,8 +306,8 @@ fn assert_shape(report: &Report) {
         "sign, verify, key-private, key-public: {report}"
     );
     assert_eq!(report.actions, 4, "one Source action each: {report}");
-    // Since 0.11.0 every check runs by default, DATATYPES and FAILURES included: none
-    // may be skipped.
+    // Since 0.11.0 every check runs by default, DATATYPES and FAILURES included, and
+    // since 0.12.0 BODIES and BODY-INPUTS: none may be skipped.
     assert_eq!(
         report.checks.skipped().collect::<Vec<_>>(),
         [] as [Check; 0],
@@ -261,20 +318,51 @@ fn assert_shape(report: &Report) {
 #[test]
 fn conforms() {
     for keys in [&ED25519, &ES256] {
-        let (kernel, _) = keystore(keys, true);
-        let graph = sign(&kernel, MESSAGE);
+        let ks = keystore(keys, true);
+        let Keystore { kernel, .. } = &ks;
+        let graph = sign(kernel, MESSAGE);
         assert!(
             graph.contains(&format!("sig:algorithm \"{}\"", keys.algorithm)),
             "{graph}"
         );
-        let report = suite(&graph)
+        let report = suite(&graph, &ks)
             .cacheable(SIGN)
             .cacheable(VERIFY)
-            .run_blocking(&kernel);
+            .run_blocking(kernel);
         // Printed even when clean (`--nocapture`): the report is the record.
         eprintln!("[{} keystore]\n{report}", keys.algorithm);
         assert!(report.is_clean(), "{}: {report}", keys.algorithm);
         assert_shape(&report);
+        // Over the threaded keystore every answer is cacheable, so BODIES (0.12.0) compares
+        // all four endpoints' `invoke` and `invoke_body` and holds each to `OverBudget` one
+        // byte short: nothing is left unprobed.
+        assert!(
+            report.unprobed.is_empty(),
+            "{}: nothing unprobed: {report}",
+            keys.algorithm
+        );
+        // BODY-INPUTS compared every `reads_body` input by reference, as stored content and
+        // as a one-shot attached body: five inputs, three transports each, less `sign`'s two
+        // under Ed25519 (opted out, see `suite`). Under ES256 that includes a one-shot `in`.
+        let compared: Vec<(&str, &str, &str)> = report
+            .declared
+            .evidence
+            .body_inputs
+            .iter()
+            .map(|c| (c.endpoint.as_str(), c.input.as_str(), c.transport.as_str()))
+            .collect();
+        let expected = if keys.algorithm == ED25519.algorithm {
+            9
+        } else {
+            15
+        };
+        assert_eq!(compared.len(), expected, "{}: {report}", keys.algorithm);
+        if keys.algorithm == ES256.algorithm {
+            assert!(
+                compared.contains(&(SIGN, "in", "one-shot attached body")),
+                "{compared:?}"
+            );
+        }
     }
     assert_eq!(
         ikigai_core::space_iri("sign").as_str(),
@@ -291,22 +379,36 @@ fn conforms() {
 /// either way.
 #[test]
 fn over_a_live_keystore_nothing_is_cached() {
-    let (kernel, _) = keystore(&ED25519, false);
-    let graph = sign(&kernel, MESSAGE);
+    let ks = keystore(&ED25519, false);
+    let Keystore { kernel, .. } = &ks;
+    let graph = sign(kernel, MESSAGE);
 
-    let report = suite(&graph).run_blocking(&kernel);
+    let report = suite(&graph, &ks).run_blocking(kernel);
     eprintln!("[live keystore, undeclared]\n{report}");
     assert!(report.is_clean(), "{report}");
     assert_shape(&report);
+    // Over a live keystore every answer is uncacheable, and two independent calls of a
+    // volatile answer cannot establish that `invoke` and `invoke_body` agree: BODIES says
+    // so for each endpoint (`conforms` is where it compares), and nothing else is unprobed.
+    let unprobed: Vec<(&str, Check)> = report
+        .unprobed
+        .iter()
+        .map(|u| (u.endpoint.as_str(), u.check))
+        .collect();
+    assert_eq!(
+        unprobed,
+        [SIGN, VERIFY, "key-private", "key-public"].map(|e| (e, Check::Bodies)),
+        "{report}"
+    );
     assert!(
         !kernel.is_cached(&sign_request(MESSAGE), &signer()),
         "a signature over an uncacheable key is not cached"
     );
 
-    let report = suite(&graph)
+    let report = suite(&graph, &ks)
         .cacheable(SIGN)
         .cacheable(VERIFY)
-        .run_blocking(&kernel);
+        .run_blocking(kernel);
     eprintln!("[live keystore, declared cacheable]\n{report}");
     let downgraded: Vec<&str> = report
         .of(Check::Cacheable)
@@ -331,7 +433,9 @@ fn over_a_live_keystore_nothing_is_cached() {
 /// to the stale one, and prove nothing.
 #[test]
 fn a_rotated_key_is_cut_and_the_signature_recomputes() {
-    let (kernel, private) = keystore(&ED25519, true);
+    let Keystore {
+        kernel, private, ..
+    } = keystore(&ED25519, true);
 
     let first = sign(&kernel, MESSAGE);
     assert!(first.contains("sig:algorithm \"Ed25519\""), "{first}");
@@ -366,7 +470,7 @@ fn a_rotated_key_is_cut_and_the_signature_recomputes() {
 /// comparison ignores).
 #[test]
 fn declared_outputs_are_the_media_types_served() {
-    let (kernel, _) = keystore(&ED25519, true);
+    let Keystore { kernel, .. } = keystore(&ED25519, true);
     let graph = sign(&kernel, MESSAGE);
     let served = [
         (

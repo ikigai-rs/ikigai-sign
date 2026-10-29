@@ -1388,13 +1388,15 @@ impl Endpoint for Sign {
             .input(
                 ArgSpec::new("in")
                     .summary("the bytes to sign (positional/named, or piped as `content`)")
-                    .class(XSD_STRING),
+                    .class(XSD_STRING)
+                    .reads_body(),
             )
             .input(
                 ArgSpec::new("content")
                     .summary("the bytes to sign — the piped-in alternative to `in`")
                     .class(XSD_STRING)
-                    .optional(),
+                    .optional()
+                    .reads_body(),
             )
             .input(
                 ArgSpec::new("key")
@@ -1489,18 +1491,21 @@ impl Endpoint for Verify {
             .input(
                 ArgSpec::new("in")
                     .summary("the bytes to verify")
-                    .class(XSD_STRING),
+                    .class(XSD_STRING)
+                    .reads_body(),
             )
             .input(
                 ArgSpec::new("sig")
                     .summary("the RDF signature-graph (Turtle), named or piped as `content`")
-                    .class(XSD_STRING),
+                    .class(XSD_STRING)
+                    .reads_body(),
             )
             .input(
                 ArgSpec::new("content")
                     .summary("the signature-graph — the piped-in alternative to `sig`")
                     .class(XSD_STRING)
-                    .optional(),
+                    .optional()
+                    .reads_body(),
             )
             .input(
                 ArgSpec::new("key")

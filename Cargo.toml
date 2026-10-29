@@ -15,8 +15,11 @@ categories = ["cryptography", "web-programming"]
 # The published kernel, consumed from crates.io — the SAME version the hosts use, so a host
 # links exactly one `ikigai-core`. 0.2.0 is the streams release (ledger #2261); the old
 # "0.1.89" pin meant >=0.1.89, <0.2.0 under 0.x caret rules, so it could never reach it.
-# 0.2.1 is the floor of the body path (`invoke_body`, `content_body`, the run's byte budget).
-ikigai-core = "0.2.1"
+# 0.2.1 is the floor of the body path (`invoke_body`, `content_body`, the run's byte budget);
+# 0.2.4 of `ArgSpec::reads_body`. From core 0.2.5 the kernel collects a by-reference argument
+# itself unless it is declared `reads_body`, which held a streamed message whole (and refused
+# one past the run's budget); every argument read through `content_body` is declared.
+ikigai-core = "0.2.4"
 async-trait = "0.1"
 
 # Ed25519 (RFC 8032, deterministic signatures) over standard PKCS8/SPKI keys. `pkcs8`+`pem`
@@ -75,5 +78,6 @@ futures = "0.3" # block_on for the async endpoint tests
 # claims `urn:iki:space:<module>`), 0.7.0 VALIDATE, and 0.8.0 REQUIRED (a dropped required
 # input must be refused with a typed MissingArgument), 0.9.0 core 0.1.105's contract-shape
 # checks and RECOMPUTE, 0.10.0 FAILURES (off unless a suite opts in), 0.11.0 core 0.2 plus
-# DATATYPES and FAILURES on by default (Suite::vocabulary is published from 0.11.0).
-ikigai-conformance = "0.11.0"
+# DATATYPES and FAILURES on by default (Suite::vocabulary is published from 0.11.0), 0.12.0
+# BODIES and BODY-INPUTS on by default (Suite::body_space).
+ikigai-conformance = "0.12.0"
