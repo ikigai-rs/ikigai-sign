@@ -281,6 +281,12 @@ nothing already signed stops verifying. Three consumers pin `0.2`. A 0.3.0 would
 each of them below this security fix until someone edits its manifest; a patch
 reaches them on their next resolve.
 
+## Accessibility
+
+Everything this crate emits is text: the verify verdict, the signature-graph and its refusals.
+[ACCESSIBILITY.md](ACCESSIBILITY.md) says what that text is, the rules it follows, what is not
+tested, and how to report a barrier.
+
 ## License
 
 Licensed under either of Apache License, Version 2.0 or MIT license at your option.
