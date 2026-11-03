@@ -139,7 +139,7 @@ nothing — the thread is the keystore's to name and to cut.
 ## Conformance
 
 Passes [`ikigai-conformance`](https://github.com/ikigai-rs/ikigai-conformance)
-(`tests/conformance.rs`, 0.12.0): every check over both keystore kinds and both
+(`tests/conformance.rs`, 0.14.0): every check over both keystore kinds and both
 algorithms, with one opt-out: under an Ed25519 key, BODY-INPUTS is waived for `sign`,
 which refuses a one-shot `in` (Ed25519 signs in two passes; see below). The ES256 walk
 holds `sign` to all four input forms. Emitted `sig:` terms are checked against this
@@ -166,6 +166,13 @@ let space = ikigai_sign::space(); // binds urn:sign:sign + urn:sign:verify
 The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is configuration-free.
 
 Both endpoints (and the crypto) are wasm-clean.
+
+## 0.5.0 (core 0.3 public API)
+
+- Requires `ikigai-core` 0.3.0: held content is scoped to its deliverer's capability
+  (ledger #2965). Hosts must use core 0.3 types with this release.
+- Uses `ikigai-conformance` 0.14.0 (dev), which delivers stored body inputs under
+  the caller's capability. This module does not write to the content store directly.
 
 ## 0.4.2 (a patch: body arguments declared)
 
