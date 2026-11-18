@@ -157,6 +157,91 @@ Combined with `ikigai-sexpr`, this closes the trust half of Code-on-Demand:
 **encode a program as a content-addressed graph → sign that graph → ship it →
 verify on receipt → run it capability-clamped.**
 
+## Receipts: a signed PROV-O record
+
+A **receipt** says that something was done: who acted, under which instruction, when, and
+what it produced. Here it is two files. A stranger can check it without this crate,
+without ikigai and without asking whoever made it.
+
+1. **The record**: what happened, in [PROV-O](https://www.w3.org/TR/prov-o/), as Turtle.
+2. **Its signature-graph**: `urn:sign:sign` over the record's exact bytes.
+
+For example, an agent's run that produced a commit while working on one item:
+
+```turtle
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+<urn:example:run:id:42> a prov:Activity ;
+    prov:wasAssociatedWith <urn:example:agent:name:worker-1> ;
+    prov:used <https://example.org/item/id/17> ;
+    prov:generated <https://example.org/repo/name/demo/commit/id/3f2c9e1> ;
+    prov:startedAtTime "2026-11-18T23:00:00Z"^^xsd:dateTime ;
+    prov:endedAtTime "2026-11-18T23:04:12Z"^^xsd:dateTime .
+```
+
+- `prov:wasAssociatedWith` names who acted.
+- `prov:used` names the instruction, here the work item.
+- `prov:generated` names what the run produced.
+- Every node is an IRI, so the record joins other graphs by name.
+
+Sign it:
+
+```text
+cat record.ttl | ikigai -c 'source urn:sign:sign key=urn:file:receipt-key.pem' > record.sig.ttl
+```
+
+```turtle
+@prefix sig: <https://ikigai-rs.dev/ns/sign#> .
+<urn:sign:sha256:c552…> a sig:Signature ;
+  sig:algorithm   "Ed25519" ;
+  sig:signer      "lO8I4fKZ…" ;
+  sig:value       "wpPmOjsV…" ;
+  sig:contentHash "sha256:aff80d58…" .
+```
+
+**The signature is over the record's bytes, not over a canonical form of its graph.** So
+keep the record file exactly as it was signed and store both files together. Reading the
+record as RDF needs no signature, and checking the signature needs no RDF.
+
+### Checking a receipt with ordinary tools
+
+The checker needs the two files and the signer's public key, obtained from the signer by
+some channel they trust. That key must never come from `sig:signer` in the graph: a forger
+would put their own key there. For Ed25519, with OpenSSL 3:
+
+```sh
+# 1. The record is the one that was signed: this digest equals sig:contentHash.
+shasum -a 256 record.ttl
+
+# 2. The signer's key signed exactly those bytes.
+sed -n 's/.*sig:value "\([^"]*\)".*/\1/p' record.sig.ttl | tr -d '\n' | base64 -d > record.sig.bin
+openssl pkeyutl -verify -pubin -inkey signer-pub.pem -rawin -in record.ttl -sigfile record.sig.bin
+# Signature Verified Successfully
+
+# 3. Read what it says with any RDF tool, e.g. a SPARQL SELECT over record.ttl.
+```
+
+- **One changed character fails step 2.** `worker-1` edited to `worker-2` gives `Signature Verification Failure`.
+- **ES256 needs one more step.** `sig:value` is fixed-width `r‖s`, so convert it to DER before OpenSSL can check it.
+- **Inside ikigai**, steps 1 and 2 are one call to `urn:sign:verify`: the record as `in`, the signature-graph as `sig`, the public key as `key`.
+
+### What a receipt does not prove
+
+- **That the record is true.** It proves the key holder stated it. Attribution is the
+  signer's claim, so it is worth only as much as the signer's honesty. Keep the signing key
+  where the agent that acted cannot reach it. A key is a resource and `sign` needs
+  `urn:cap:sign`, so the host can hold both and the agent neither.
+- **That no receipt is missing.** One receipt says nothing about the others. For a
+  sequence, write the records through [`ikigai-log`](https://github.com/ikigai-rs/ikigai-log).
+  It hash-chains its entries across rotations, its segments read as PROV-O graphs, and it
+  seals the chain at intervals with this crate's `sig:` terms. A removed or altered record
+  then shows between two seals. The newest records can still be cut off unnoticed unless
+  the latest seal is published or held by a witness outside the writer's reach.
+- **When it was signed.** The graph has no timestamp, so that it stays content-addressable.
+  The time in the record is the signer's claim too. To prove a record existed by some
+  moment, publish its digest or have a timestamping service sign it.
+
 ## Using it from a host
 
 ```rust,ignore
