@@ -1309,9 +1309,9 @@ impl Endpoint for Sign {
         // where no kernel gate ran — a detached invocation, a module shim. A typed `Denied`
         // (permanent, never transient).
         if !inv.capability.allows(CAP_SIGN) {
-            return Err(CoreError::Denied(format!(
-                "urn:sign:sign requires the {CAP_SIGN} capability"
-            )));
+            return Err(CoreError::Denied(
+                format!("urn:sign:sign requires the {CAP_SIGN} capability").into(),
+            ));
         }
 
         let message = read_bytes(inv, &["in", "content"])?;
@@ -1338,9 +1338,9 @@ impl Endpoint for Sign {
     /// and their order are [`invoke`](Endpoint::invoke)'s for the same inline input.
     async fn invoke_body(&self, inv: &Invocation<'_>) -> CoreResult<Representation<Body>> {
         if !inv.capability.allows(CAP_SIGN) {
-            return Err(CoreError::Denied(format!(
-                "urn:sign:sign requires the {CAP_SIGN} capability"
-            )));
+            return Err(CoreError::Denied(
+                format!("urn:sign:sign requires the {CAP_SIGN} capability").into(),
+            ));
         }
 
         let (arg, message) = read_body(inv, &["in", "content"]).await?;
