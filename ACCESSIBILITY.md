@@ -28,7 +28,9 @@ This is a library: two endpoints a host binds. Everything it emits is text, all 
   key scheme other than `urn:` or `file:`, a one-shot body under an Ed25519 key, which names
   `urn:stream:spill` as the fix); a missing capability is `Denied`, naming `urn:cap:sign`; a key
   or graph that does not parse is an error prefixed with the endpoint's IRI
-  (`urn:sign:sign: not a valid SPKI Ed25519 public key (PEM): …`).
+  (`urn:sign:verify: not a valid SPKI Ed25519 public key (PEM): …`). A well-formed public key
+  of the other algorithm is named as such: `the public key is a P-256 (ES256) key, but the
+  signature-graph's sig:algorithm is Ed25519; verify with the signer's Ed25519 public key`.
 
 Not this repository's: how a host shows any of this (a terminal, a web page, a log). The
 wording of core's `MissingArgument`, `InvalidArgument` and `Denied` displays is

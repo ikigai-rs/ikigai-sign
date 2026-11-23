@@ -626,6 +626,39 @@ fn an_ed25519_key_cannot_verify_an_es256_signature() {
 }
 
 #[test]
+fn a_key_of_the_other_algorithm_is_named_not_called_unsupported() {
+    // A well-formed public key of the wrong algorithm is an error, and the error says what
+    // the key is and what the graph wants. Before 0.6.1 it passed on the SPKI parser's text,
+    // which names the OID it EXPECTED as unsupported: an Ed25519 graph given a P-256 key said
+    // "unknown/unsupported algorithm OID: 1.3.101.112", the Ed25519 OID, never naming P-256.
+    let k = kernel();
+    let ed_graph = sign(&k, b"msg", "urn:test:k1-priv");
+    let es_graph = sign(&k, b"msg", "urn:test:p256-priv");
+    let cases = [
+        (
+            &ed_graph,
+            "urn:test:p256-pub",
+            "a P-256 (ES256) key",
+            "is Ed25519",
+        ),
+        (&es_graph, "urn:test:k1-pub", "an Ed25519 key", "is ES256"),
+    ];
+    for (graph, key, key_is, wants) in cases {
+        let req = verify_request(b"msg", graph, key);
+        for req in [bytes_path(&req), req] {
+            let err = block_on(k.issue(req, &Capability::root()))
+                .expect_err("a key of the other algorithm is an error")
+                .to_string();
+            assert!(
+                err.contains(key_is) && err.contains(wants),
+                "names neither the key nor the graph's algorithm: {err}"
+            );
+            assert!(!err.contains("unsupported"), "{err}");
+        }
+    }
+}
+
+#[test]
 fn an_ed25519_signature_still_verifies_unchanged() {
     // The whole point of dispatch: adding ES256 did not disturb Ed25519.
     let k = kernel();

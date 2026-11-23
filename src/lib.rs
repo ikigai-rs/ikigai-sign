@@ -393,23 +393,58 @@ fn ed25519_signer_b64(key: &VerifyingKey) -> String {
 }
 
 /// Parse SPKI Ed25519 **public** key material — PEM or DER. Clear message on failure; no panic.
+///
+/// A well-formed key of the OTHER algorithm is named as such (see [`wrong_algorithm_key`]):
+/// the parser's own error would call the Ed25519 OID it expected "unknown/unsupported".
 fn parse_ed25519_public(bytes: &[u8]) -> Result<VerifyingKey, String> {
-    match as_pem(bytes) {
+    let parsed = match as_pem(bytes) {
         Some(pem) => VerifyingKey::from_public_key_pem(pem)
             .map_err(|e| format!("not a valid SPKI Ed25519 public key (PEM): {e}")),
         None => VerifyingKey::from_public_key_der(bytes)
             .map_err(|e| format!("not a valid SPKI Ed25519 public key (DER): {e}")),
-    }
+    };
+    parsed.map_err(|e| match p256_public(bytes) {
+        Ok(_) => wrong_algorithm_key(ALG_ED25519, "a P-256 (ES256)"),
+        Err(_) => e,
+    })
 }
 
 /// Parse SPKI P-256 **public** key material — PEM or DER. Clear message on failure; no panic.
+///
+/// A well-formed key of the OTHER algorithm is named as such (see [`wrong_algorithm_key`]).
 fn parse_p256_public(bytes: &[u8]) -> Result<P256VerifyingKey, String> {
+    p256_public(bytes).map_err(|e| match ed25519_public(bytes) {
+        Ok(_) => wrong_algorithm_key(ALG_ES256, "an Ed25519"),
+        Err(_) => e,
+    })
+}
+
+/// The P-256 SPKI parse alone, with its own message.
+fn p256_public(bytes: &[u8]) -> Result<P256VerifyingKey, String> {
     match as_pem(bytes) {
         Some(pem) => P256VerifyingKey::from_public_key_pem(pem)
             .map_err(|e| format!("not a valid SPKI P-256 public key (PEM): {e}")),
         None => P256VerifyingKey::from_public_key_der(bytes)
             .map_err(|e| format!("not a valid SPKI P-256 public key (DER): {e}")),
     }
+}
+
+/// The Ed25519 SPKI parse alone, for recognising an Ed25519 key handed to the ES256 arm.
+fn ed25519_public(bytes: &[u8]) -> Result<VerifyingKey, ed25519_dalek::pkcs8::spki::Error> {
+    match as_pem(bytes) {
+        Some(pem) => VerifyingKey::from_public_key_pem(pem),
+        None => VerifyingKey::from_public_key_der(bytes),
+    }
+}
+
+/// The error for a well-formed public key of the wrong algorithm. The SPKI parsers report
+/// the OID they EXPECTED as "unknown/unsupported", which names a supported algorithm as
+/// unsupported and never says what the key is; this says both.
+fn wrong_algorithm_key(graph_algorithm: &str, key_is: &str) -> String {
+    format!(
+        "the public key is {key_is} key, but the signature-graph's sig:algorithm is \
+         {graph_algorithm}; verify with the signer's {graph_algorithm} public key"
+    )
 }
 
 /// The named-curve OID for NIST P-256 (`prime256v1` / `secp256r1`).
