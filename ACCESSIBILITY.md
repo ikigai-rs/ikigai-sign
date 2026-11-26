@@ -15,7 +15,7 @@ how to report a barrier. It is not a conformance claim. Adapted from the
 ## What it emits that people read
 
 This is a library: two endpoints a host binds. Everything it emits is text, all of it in
-`src/lib.rs`.
+`src/lib.rs` and, for the encoding refusals, `src/multikey.rs`.
 
 - **The verdict** from `urn:sign:verify`, as `text/plain` (`Verdict::render`): one line,
   `valid: signed by <base64 public key> (algorithm Ed25519)` or `invalid: <reason>`, where the
@@ -31,6 +31,10 @@ This is a library: two endpoints a host binds. Everything it emits is text, all 
   (`urn:sign:verify: not a valid SPKI Ed25519 public key (PEM): …`). A well-formed public key
   of the other algorithm is named as such: `the public key is a P-256 (ES256) key, but the
   signature-graph's sig:algorithm is Ed25519; verify with the signer's Ed25519 public key`.
+
+- **Encoding refusals** from `ikigai_sign::multikey` (`MultikeyError`'s display): one
+  sentence that starts `not ` and says what was expected, such as `not a base58-btc multibase
+  value: it must start with z` or `not an Ed25519 public key: it must be 32 bytes, got 31`.
 
 Not this repository's: how a host shows any of this (a terminal, a web page, a log). The
 wording of core's `MissingArgument`, `InvalidArgument` and `Denied` displays is
@@ -70,6 +74,7 @@ host interface, evaluate pronunciation or establish usability with assistive tec
 | Missing or unusable input identified | Pass | `src/tests.rs`: `a_missing_required_input_is_a_typed_missing_argument` and `a_given_but_unusable_input_is_a_typed_invalid_argument`; `tests/audit_857.rs`: `a_key_iri_outside_urn_and_file_is_refused_before_resolution` and `an_unparseable_key_iri_is_invalid_argument_on_key`. Check typed errors naming the input, not core's displayed wording. |
 | Capability denial and one-shot recovery hint | Pass | `src/tests.rs`: `sign_without_cap_is_typed_denied` checks the error type; `ed25519_refuses_a_one_shot_body_and_names_spill` checks the argument and `urn:stream:spill` hint. They do not evaluate the displayed denial or the ease of following the hint. |
 | Signature-graph structure and literal escaping | Pass | `src/tests.rs`: `signature_graph_parses_as_rdf_with_expected_triples`, `turtle_string_escapes_every_reserved_character` and `turtle_string_output_round_trips_through_a_turtle_parser`. Check RDF structure and escaping for fixtures, not human navigation of Turtle. |
+| Encoding refusals say what is expected | Pass | `src/multikey/tests.rs`: `every_refusal_says_what_is_expected` asserts each `MultikeyError` message starts `not ` and names the expected form; `each_malformed_value_is_refused_with_its_reason` checks which refusal each malformed value gets. Added with 0.7.0; not part of the 2026-11-12 run above. |
 | Output media types | Pass | `tests/conformance.rs`: `declared_outputs_are_the_media_types_served` checks declared versus served types; not their presentation in a host. |
 | Complete output review for color, control sequences and markup | Blocked | Historical source review recorded 2026-10-31 was not a test and is not repeated by CI. No comprehensive output audit, including input-derived and dependency-provided text, was run for this update. |
 | Browser presentation and manual keyboard | Blocked | No host browser or terminal interface was exercised and no person performed a keyboard pass in this update. The library supplies no interactive interface to test on its own. |

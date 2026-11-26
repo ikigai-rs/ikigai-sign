@@ -97,6 +97,12 @@
 //! thread is the keystore's to name and to cut — `tests/conformance.rs` pins both halves, and
 //! runs `ikigai-conformance` over [`space`] under both keystore kinds and both algorithms.
 //!
+//! ## Multibase, Multikey and `did:key` (since 0.7.0)
+//!
+//! [`multikey`] holds the encodings Data Integrity proofs and `did:key` put around an Ed25519
+//! key and signature: base58-btc multibase, the Ed25519 Multikey, and `did:key` encode and
+//! resolve. The signer is unchanged; the published vectors are in `tests/vector/`.
+//!
 //! ## The `sig:` vocabulary
 //!
 //! Defined in [`VOCABULARY_TTL`] under `https://ikigai-rs.dev/ns/sign#` (see [`SIG_NS`]).
@@ -111,6 +117,8 @@
 //! loud one.
 
 #![forbid(unsafe_code)]
+
+pub mod multikey;
 
 use async_trait::async_trait;
 use base64::Engine as _;

@@ -1,0 +1,57 @@
+{
+  "title": "did:key test vectors for Ed25519",
+  "note": "Values copied verbatim from the cited sources. seed is the 32-byte Ed25519 private seed (hex); publicKeyBase58 is the raw 32-byte public key in base58-btc with no multibase prefix and no multicodec; publicKeyJwkX is the same raw key as the JWK x member (base64url, no padding); publicKeyMultibase is base58-btc of 0xed01 followed by the key, with the z prefix.",
+  "vector": [
+    {
+      "did": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+      "seed": "0000000000000000000000000000000000000000000000000000000000000000",
+      "publicKeyBase58": "4zvwRjXUKGfvwnParsHAS3HuSVzV5cA4McphgmoCtajS",
+      "publicKeyMultibase": "z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+      "source": "https://github.com/w3c-ccg/did-key-spec/blob/31821ca5d3357b8e366d2fc13373c10bc5e86f62/test-vectors/ed25519-x25519.json"
+    },
+    {
+      "did": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+      "seed": "0000000000000000000000000000000000000000000000000000000000000001",
+      "publicKeyBase58": "6ASf5EcmmEHTgDJ4X4ZT5vT6iHVJBXPg5AN5YoTCpGWt",
+      "publicKeyMultibase": "z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBH1P5RDjVJG",
+      "source": "https://github.com/w3c-ccg/did-key-spec/blob/31821ca5d3357b8e366d2fc13373c10bc5e86f62/test-vectors/ed25519-x25519.json"
+    },
+    {
+      "did": "did:key:z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+      "seed": "0000000000000000000000000000000000000000000000000000000000000002",
+      "publicKeyBase58": "8pM1DN3RiT8vbom5u1sNryaNT1nyL8CTTW3b5PwWXRBH",
+      "publicKeyMultibase": "z6MknGc3ocHs3zdPiJbnaaqDi58NGb4pk1Sp9WxWufuXSdxf",
+      "source": "https://github.com/w3c-ccg/did-key-spec/blob/31821ca5d3357b8e366d2fc13373c10bc5e86f62/test-vectors/ed25519-x25519.json"
+    },
+    {
+      "did": "did:key:z6MkvqoYXQfDDJRv8L4wKzxYeuKyVZBfi9Qo6Ro8MiLH3kDQ",
+      "seed": "0000000000000000000000000000000000000000000000000000000000000003",
+      "publicKeyBase58": "HPYVwAQmskwT1qEEeRzhoomyfyupJGASQQtCXSNG8XS2",
+      "publicKeyMultibase": "z6MkvqoYXQfDDJRv8L4wKzxYeuKyVZBfi9Qo6Ro8MiLH3kDQ",
+      "source": "https://github.com/w3c-ccg/did-key-spec/blob/31821ca5d3357b8e366d2fc13373c10bc5e86f62/test-vectors/ed25519-x25519.json"
+    },
+    {
+      "did": "did:key:z6MkwYMhwTvsq376YBAcJHy3vyRWzBgn5vKfVqqDCgm7XVKU",
+      "seed": "0000000000000000000000000000000000000000000000000000000000000005",
+      "publicKeyJwkX": "_eT7oDCtAC98L31MMx9J0T-w7HR-zuvsY08f9MvKne8",
+      "publicKeyMultibase": "z6MkwYMhwTvsq376YBAcJHy3vyRWzBgn5vKfVqqDCgm7XVKU",
+      "source": "https://github.com/w3c-ccg/did-key-spec/blob/31821ca5d3357b8e366d2fc13373c10bc5e86f62/test-vectors/ed25519-x25519.json"
+    },
+    {
+      "did": "did:key:z6Mkf5rGMoatrSj1f4CyvuHBeXJELe9RPdzo2PKGNCKVtZxP",
+      "publicKeyMultibase": "z6Mkf5rGMoatrSj1f4CyvuHBeXJELe9RPdzo2PKGNCKVtZxP",
+      "source": "https://github.com/w3c-ccg/did-key-spec/blob/96136d8d0f5ddce64994bde04620364a1b43d1e9/index.html (Test Vectors, Ed25519)"
+    },
+    {
+      "did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+      "publicKeyMultibase": "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+      "verificationMethod": {
+        "id": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK#z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        "type": "Multikey",
+        "controller": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        "publicKeyMultibase": "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+      },
+      "source": "https://github.com/w3c-ccg/did-key-spec/blob/96136d8d0f5ddce64994bde04620364a1b43d1e9/index.html (Test Vectors, Ed25519 with X25519)"
+    }
+  ]
+}

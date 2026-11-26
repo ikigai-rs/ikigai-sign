@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-sign"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.87"   # measured: oxrdf/oxrdfio/oxttl 0.x require 1.87; clippy + test pass on 1.87
 license = "MIT OR Apache-2.0"
@@ -48,6 +48,12 @@ sha2 = "0.10"
 # ikigai-core (which defines `ByteStream` over it); no executor, wasm-clean.
 futures-util = { version = "0.3", default-features = false }
 
+# base58-btc for Multibase (`z…`), Multikey and `did:key` (src/multikey.rs). `bs58` 0.5.1 is
+# the well-known Bitcoin-alphabet codec; with only `alloc` it has no dependencies of its own.
+# Chosen over `multibase` 0.9, which carries a dozen bases this module never reads; that
+# crate is a dev-dependency instead, as the second implementation the tests decode against.
+bs58 = { version = "0.5.1", default-features = false, features = ["alloc"] }
+
 # Base64 for the `sig:signer` (public key) and `sig:value` (signature) literals.
 base64 = "0.22"
 
@@ -78,3 +84,10 @@ futures = "0.3" # block_on for the async endpoint tests
 # and delivers BODY-INPUTS content under the caller's capability (ledger #2965);
 # 0.15.0 uses core 0.4.0.
 ikigai-conformance = "0.15.0"
+# A second, independent base58-btc implementation (`base-x` underneath, not `bs58`): a key
+# encoded here must decode there, and the reverse (src/multikey.rs tests). Pinned to 0.9.2:
+# 0.9.3 adds `base45` 3.2, which needs a newer compiler than this crate's rust-version (1.87)
+# and declares none, so the MSRV gate cannot resolve around it. 0.9.2 has the same base58-btc.
+multibase = "=0.9.2"
+# Reads the committed vectors in tests/vector/. Already in the graph under ikigai-core.
+serde_json = "1"

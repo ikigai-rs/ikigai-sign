@@ -252,6 +252,27 @@ The space names itself `urn:iki:space:sign` (`ikigai_sign::SPACE_ID`): it is con
 
 Both endpoints (and the crypto) are wasm-clean.
 
+## Multibase, Multikey and did:key
+
+`ikigai_sign::multikey` has the encodings a Data Integrity proof
+([vc-data-integrity](https://www.w3.org/TR/vc-data-integrity/),
+[vc-di-eddsa](https://www.w3.org/TR/vc-di-eddsa/)) and a `did:key` put around an Ed25519 key:
+
+- `multibase_encode` / `multibase_decode`: base58-btc with the `z` prefix (the `bs58` crate);
+- `multikey_encode` / `multikey_decode`: `publicKeyMultibase`, base58-btc of `0xed01` and the
+  32-byte key (always `z6Mk…`);
+- `did_key_encode` / `did_key_resolve`: `did:key:z6Mk…` from a key, and back to its `Multikey`
+  verification method (`did:key:<mk>#<mk>`).
+
+The signer is unchanged. A Data Integrity proof gives it 64 bytes of hash data, and the 64-byte
+signature it returns is the `proofValue` once multibase-encoded. The published vectors this is
+tested against are committed in [`tests/vector/`](tests/vector/) with LF line endings, so the
+Python and TypeScript faces can pin the same files.
+
+## 0.7.0 (Multibase, Multikey and did:key)
+
+- Adds `ikigai_sign::multikey` (above). Sign and verify are unchanged.
+
 ## 0.5.0 (core 0.3 public API)
 
 - Requires `ikigai-core` 0.3.0: held content is scoped to its deliverer's capability
