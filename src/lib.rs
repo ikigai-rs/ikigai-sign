@@ -97,7 +97,7 @@
 //! thread is the keystore's to name and to cut — `tests/conformance.rs` pins both halves, and
 //! runs `ikigai-conformance` over [`space`] under both keystore kinds and both algorithms.
 //!
-//! ## Multibase, Multikey and `did:key` (since 0.7.0)
+//! ## Multibase, Multikey and `did:key` (since 0.6.2)
 //!
 //! [`multikey`] holds the encodings Data Integrity proofs and `did:key` put around an Ed25519
 //! key and signature: base58-btc multibase, the Ed25519 Multikey, and `did:key` encode and

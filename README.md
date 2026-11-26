@@ -269,7 +269,7 @@ signature it returns is the `proofValue` once multibase-encoded. The published v
 tested against are committed in [`tests/vector/`](tests/vector/) with LF line endings, so the
 Python and TypeScript faces can pin the same files.
 
-## 0.7.0 (Multibase, Multikey and did:key)
+## 0.6.2 (Multibase, Multikey and did:key)
 
 - Adds `ikigai_sign::multikey` (above). Sign and verify are unchanged.
 
