@@ -1,0 +1,28 @@
+{
+  "title": "EdDSA cryptosuite v1.0 test vectors (Ed25519)",
+  "source": "https://www.w3.org/TR/vc-di-eddsa/ (Appendix B.1 and B.3)",
+  "note": "Values copied verbatim from the cited source. Hex values are lowercase. hashData is proofConfigHash followed by credentialHash, the 64 bytes Ed25519 signs; signature is the 64-byte Ed25519 signature over hashData; proofValue is that signature in base58-btc multibase. secretKeyMultibase is base58-btc of 0x8026 followed by the 32-byte seed.",
+  "publicKeyMultibase": "z6MkrJVnaZkeFzdQyMZu1cgjg7k1pZZ6pvBQ7XJPt4swbTQ2",
+  "secretKeyMultibase": "z3u2en7t5LR2WtQH5PfFqMqwVHBeXouLzo6haApm8XHqvjxq",
+  "verificationMethod": "did:key:z6MkrJVnaZkeFzdQyMZu1cgjg7k1pZZ6pvBQ7XJPt4swbTQ2#z6MkrJVnaZkeFzdQyMZu1cgjg7k1pZZ6pvBQ7XJPt4swbTQ2",
+  "proof": [
+    {
+      "cryptosuite": "eddsa-rdfc-2022",
+      "source": "https://www.w3.org/TR/vc-di-eddsa/#representation-eddsa-rdfc-2022",
+      "credentialHash": "517744132ae165a5349155bef0bb0cf2258fff99dfe1dbd914b938d775a36017",
+      "proofConfigHash": "bea7b7acfbad0126b135104024a5f1733e705108f42d59668b05c0c50004c6b0",
+      "hashData": "bea7b7acfbad0126b135104024a5f1733e705108f42d59668b05c0c50004c6b0517744132ae165a5349155bef0bb0cf2258fff99dfe1dbd914b938d775a36017",
+      "signature": "4d8e53c2d5b3f2a7891753eb16ca993325bdb0d3cfc5be1093d0a18426f5ef8578cadc0fd4b5f4dd0d1ce0aefd15ab120b7a894d0eb094ffda4e6553cd1ed50d",
+      "proofValue": "z2YwC8z3ap7yx1nZYCg4L3j3ApHsF8kgPdSb5xoS1VR7vPG3F561B52hYnQF9iseabecm3ijx4K1FBTQsCZahKZme"
+    },
+    {
+      "cryptosuite": "eddsa-jcs-2022",
+      "source": "https://www.w3.org/TR/vc-di-eddsa/#representation-eddsa-jcs-2022",
+      "credentialHash": "59b7cb6251b8991add1ce0bc83107e3db9dbbab5bd2c28f687db1a03abc92f19",
+      "proofConfigHash": "66ab154f5c2890a140cb8388a22a160454f80575f6eae09e5a097cabe539a1db",
+      "hashData": "66ab154f5c2890a140cb8388a22a160454f80575f6eae09e5a097cabe539a1db59b7cb6251b8991add1ce0bc83107e3db9dbbab5bd2c28f687db1a03abc92f19",
+      "signature": "407cd12654b33d718ecbb99179a1506daaa849450bf3fc523cce3e1c96f8b80351da3f253d725c6f00b07c9e5448d50b3ef78012b9ab54255116d069c6dd2808",
+      "proofValue": "z2HnFSSPPBzR36zdDgK8PbEHeXbR56YF24jwMpt3R1eHXQzJDMWS93FCzpvJpwTWd3GAVFuUfjoJdcnTMuVor51aX"
+    }
+  ]
+}
